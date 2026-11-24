@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/image/{hash}", get(image))
         .route("/api/health", get(health))
         .route("/ws", get(websocket))
-        .nest_service("/", files)
+        .fallback_service(files)
         .layer(CorsLayer::permissive())
         .with_state(state);
 

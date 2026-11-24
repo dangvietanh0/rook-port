@@ -54,10 +54,7 @@ jobs:
         run: |
           python3 -m venv /tmp/rook-venv
           /tmp/rook-venv/bin/pip install --quiet websockets msgpack
-          ./target/release/rook-web-server apps/rook-web-server/tests/demo.rbxlx --offline --addr 127.0.0.1:8080 &
-          server=$!
-          trap 'kill "$server" 2>/dev/null || true' EXIT
-          /tmp/rook-venv/bin/python apps/rook-web-server/tests/smoke.py
+          /tmp/rook-venv/bin/python apps/rook-web-server/tests/smoke.py ./target/release/rook-web-server
 
       - uses: actions/upload-artifact@v4
         with:

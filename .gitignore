@@ -18,6 +18,10 @@ api_key
 .env
 cookie.txt
 
+# Python
+__pycache__/
+*.pyc
+
 # Editor / OS
 .vscode/
 .idea/
