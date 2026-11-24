@@ -1,0 +1,83 @@
+# Checks the web port: the headless server (a workspace member) and the
+# browser client, on GitHub's machines. Upstream's check.yml covers the
+# rest of the workspace.
+name: Web port
+
+on:
+  push:
+    branches: [main, web-port]
+    paths:
+      - "apps/rook-web-server/**"
+      - "web-client/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/web-port.yml"
+  pull_request:
+    paths:
+      - "apps/rook-web-server/**"
+      - "web-client/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/web-port.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-port-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Headless server
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-port
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy -p rook-web-server --all-targets -- -D warnings
+      - run: cargo build -p rook-web-server --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rook-web-server
+          path: target/release/rook-web-server
+          if-no-files-found: error
+
+  client:
+    name: Browser client
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web-client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-client/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-client
+          path: web-client/dist
+          if-no-files-found: error

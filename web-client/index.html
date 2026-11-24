@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rook</title>
+    <link rel="icon" href="/rook.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <canvas id="viewport"></canvas>
+    <div id="gui"></div>
+    <div id="hud">
+      <div class="row"><span class="label">Place</span><span id="place">-</span></div>
+      <div class="row"><span class="label">Parts</span><span id="parts">0</span></div>
+      <div class="row"><span class="label">Ping</span><span id="ping">-</span></div>
+      <div class="row"><span class="label">FPS</span><span id="fps">-</span></div>
+      <div id="status" class="ok">connecting</div>
+    </div>
+    <div id="controls">
+      <strong>WASD</strong> move &middot; <strong>Q/E</strong> down/up &middot;
+      <strong>Shift</strong> fast &middot; <strong>drag</strong> look &middot;
+      <strong>click</strong> lock mouse
+    </div>
+    <div id="loading"><div class="spinner"></div><p>Loading the place…</p></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -7,3 +7,22 @@ This product includes software developed by the Rook Contributors
 Rook is an independent project. It is not affiliated with, endorsed by,
 or sponsored by Roblox Corporation. "Roblox" is a trademark of Roblox
 Corporation.
+
+The web port (apps/rook-web-server and web-client) is derived from Rook
+and is distributed under the same Apache License, Version 2.0.
+
+Modified upstream files (see docs/web-port.md):
+  crates/rook-scene/src/lib.rs      added DrawnEntry and SceneCache::drawn_entries
+  crates/rook-scene/src/frame.rs    added ToRender::take_images and take_dropped_meshes
+  crates/rook-client/src/game.rs    exposed Game's view, input, viewport and timing accessors
+  crates/rook-platform/Cargo.toml   arboard is a desktop-only dependency
+  crates/rook-platform/src/clipboard.rs  no-op clipboard on Android, where arboard has no backend
+
+New files in apps/rook-web-server:
+  Copyright 2026 The Rook Contributors, Apache-2.0.
+
+The web client uses these third-party packages, each under its own license:
+  three                     MIT
+  @msgpack/msgpack          ISC
+  vite                      MIT
+  typescript                Apache-2.0

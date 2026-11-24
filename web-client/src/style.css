@@ -1,0 +1,167 @@
+:root {
+  color-scheme: dark;
+  --panel: rgba(14, 17, 22, 0.78);
+  --text: #e8edf4;
+  --muted: #9aa7b8;
+  --ok: #63d391;
+  --warn: #f0c14b;
+  --bad: #f06d6d;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0e13;
+  color: var(--text);
+}
+
+#viewport {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+#gui {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  z-index: 4;
+}
+
+.gui-node {
+  position: absolute;
+  transform-origin: center;
+  /* Each object stacks its children in its own layer, like Rook's
+     ZIndexBehavior Sibling default. */
+  isolation: isolate;
+}
+
+.gui-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  font-kerning: normal;
+}
+
+.gui-image {
+  position: absolute;
+  inset: 0;
+}
+
+/* Rook tints a hovered button's background; the DOM can show the same
+   feedback without a round trip. */
+.gui-node[data-class="TextButton"]:hover,
+.gui-node[data-class="ImageButton"]:hover {
+  filter: brightness(0.85);
+}
+
+.gui-node[data-class="TextButton"]:active,
+.gui-node[data-class="ImageButton"]:active {
+  filter: brightness(1.2);
+}
+
+#hud {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 6;
+  min-width: 190px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  line-height: 1.65;
+  pointer-events: none;
+  user-select: none;
+}
+
+#hud .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+#hud .label {
+  color: var(--muted);
+}
+
+#status {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-weight: 600;
+}
+
+#status.ok { color: var(--ok); }
+#status.warn { color: var(--warn); }
+#status.bad { color: var(--bad); }
+
+#controls {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+#controls strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+#loading {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: #0b0e13;
+  transition: opacity 0.4s ease;
+  z-index: 10;
+}
+
+#loading.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#loading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.spinner {
+  width: 30px;
+  height: 30px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--ok);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
