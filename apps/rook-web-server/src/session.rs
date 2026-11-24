@@ -133,7 +133,7 @@ pub(crate) fn spawn(
     std::thread::Builder::new()
         .name("rook-session".to_owned())
         .spawn(move || {
-            let result = run(&place, play, content, &shared, &frames, &commands);
+            let result = run(&place, play, &content, &shared, &frames, &commands);
             if let Err(error) = &result {
                 let message = format!("{error:#}");
                 eprintln!("session failed: {message}");
@@ -152,7 +152,7 @@ pub(crate) fn spawn(
 fn run(
     place: &Path,
     play: bool,
-    content: Arc<Resolver>,
+    content: &Arc<Resolver>,
     shared: &Arc<Mutex<Shared>>,
     frames: &broadcast::Sender<Vec<u8>>,
     commands: &Receiver<Command>,
@@ -173,7 +173,7 @@ fn run(
     game.set_viewport(1280, 720);
     let saved_camera = game.saved_camera();
 
-    let mut session = Session::new(game, saved_camera, &content, shared, frames);
+    let mut session = Session::new(game, saved_camera, content, shared, frames);
     session.prime()?;
     session.run(commands)
 }
