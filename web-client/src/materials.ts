@@ -111,23 +111,38 @@ export function tinted(color: [number, number, number], tint: [number, number, n
 
 /** A material that can be shared by an InstancedMesh: white so the
  * instance colours show, with only the material class's shading. */
-export function instancedMaterial(snap: PartSnapshot): THREE.Material {
+export function instancedMaterial(snap: PartSnapshot, textures: Textures): THREE.Material {
   const look = preset(snap.material);
-  const params: THREE.MeshStandardMaterialParameters = {
+  const opacity = 1 - Math.min(Math.max(snap.transparency, 0), 1);
+  const side = snap.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
+  const transparent = opacity < 0.999;
+  const depthWrite = opacity > 0.999;
+  // Neon is unlit in practice; an unlit basic material keeps its glow
+  // while the instance colour still comes from the part.
+  if (snap.light >= 1 || look.emissive) {
+    const basic = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      side,
+      transparent,
+      opacity,
+      depthWrite,
+      toneMapped: snap.light < 2,
+    });
+    applyMaps(basic, snap, textures);
+    return basic;
+  }
+  const material = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     metalness: look.metalness,
     roughness: look.roughness,
-    side: snap.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+    side,
+    transparent,
+    opacity,
+    depthWrite,
     envMapIntensity: 0.4 + snap.reflectance * 1.4,
-  };
-  if (snap.light >= 1) {
-    return new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      side: params.side,
-      toneMapped: snap.light < 2,
-    });
-  }
-  return new THREE.MeshStandardMaterial(params);
+  });
+  applyMaps(material, snap, textures);
+  return material;
 }
 
 /** A part's own material: its colour, textures and transparency. */

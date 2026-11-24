@@ -22,7 +22,10 @@ const GUI_INSET: f32 = 58.0;
 
 /// The whole GUI the browser should draw: one node per enabled ScreenGui,
 /// bottom first, each with its objects as children.
-pub(crate) fn tree(dom: &Dom, gui: &mut Gui) -> Vec<GuiNode> {
+pub(crate) fn tree(dom: &mut Dom, gui: &mut Gui) -> Vec<GuiNode> {
+    // The session can ask for the tree before its first step, so bring the
+    // layout up to date here; afterwards this is a lookup.
+    gui.sync(dom);
     let Some(player) = dom.local_player() else {
         return Vec::new();
     };

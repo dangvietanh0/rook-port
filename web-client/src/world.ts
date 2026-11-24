@@ -11,7 +11,7 @@ import type {
 } from "./protocol";
 import { PLACEMENT, SHAPE } from "./protocol";
 import { MeshCache, Textures } from "./mesh";
-import { decalMaterial, instancedMaterial, partMaterial, srgb } from "./materials";
+import { decalMaterial, instancedMaterial, partMaterial, srgb, tinted } from "./materials";
 
 const SNAPSHOT_MS = 50;
 
@@ -42,6 +42,8 @@ interface Atom {
   from: Trs;
   to: Trs;
   changedAt: number;
+  /** Whether the transform is still interpolating toward `to`. */
+  moving: boolean;
   pool?: Pool;
   slot?: number;
   object?: THREE.Object3D;
@@ -58,6 +60,7 @@ class Pool {
   private used = 0;
   private readonly capacity: number;
   private colorDirty = false;
+  private matrixDirty = false;
 
   constructor(
     geometry: THREE.BufferGeometry,
@@ -94,8 +97,13 @@ class Pool {
   release(slot: number): void {
     const zero = new THREE.Matrix4().makeScale(0, 0, 0);
     this.mesh.setMatrixAt(slot, zero);
-    this.mesh.instanceMatrix.needsUpdate = true;
+    this.matrixDirty = true;
     this.free.push(slot);
+  }
+
+  setMatrix(slot: number, matrix: THREE.Matrix4): void {
+    this.mesh.setMatrixAt(slot, matrix);
+    this.matrixDirty = true;
   }
 
   setColor(slot: number, color: THREE.Color): void {
@@ -104,7 +112,10 @@ class Pool {
   }
 
   flush(): void {
-    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.matrixDirty) {
+      this.mesh.instanceMatrix.needsUpdate = true;
+      this.matrixDirty = false;
+    }
     if (this.colorDirty && this.mesh.instanceColor) {
       this.mesh.instanceColor.needsUpdate = true;
       this.colorDirty = false;
@@ -271,25 +282,50 @@ export class World {
   private sky = new Sky();
   private skyboxKey = "";
   private lighting?: Lighting;
+  private readonly maxPixelRatio: number;
+  private readonly adaptive: boolean;
+  private pixelRatio: number;
+  private qualityFrames = 0;
+  private qualitySince = performance.now();
 
   constructor(private readonly canvas: HTMLCanvasElement) {
+    const params = new URLSearchParams(window.location.search);
+    const mobile =
+      window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+    const dpr = window.devicePixelRatio || 1;
+    const requested = Number(params.get("pixelRatio") ?? "");
+    const forced = Number.isFinite(requested) && requested > 0;
+    this.adaptive = !forced;
+    this.maxPixelRatio = forced
+      ? requested
+      : mobile
+        ? Math.min(dpr, 1.5)
+        : Math.min(dpr, 2);
+    this.pixelRatio = forced
+      ? Math.min(requested, this.maxPixelRatio)
+      : mobile
+        ? Math.min(this.maxPixelRatio, 1.25)
+        : this.maxPixelRatio;
+
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: true,
+      // MSAA is expensive at phone pixel ratios, and the resolution scale
+      // already provides some smoothing.
+      antialias: !mobile || dpr <= 1.5,
       powerPreference: "high-performance",
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1;
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.shadowMap.enabled = params.get("shadows") !== "0";
+    this.renderer.shadowMap.type = mobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+    this.renderer.setPixelRatio(this.pixelRatio);
 
     this.scene.add(this.sky.mesh);
     this.scene.add(this.hemisphere, this.ambient, this.sun);
     this.sun.castShadow = true;
     const shadow = this.sun.shadow;
-    shadow.mapSize.set(2048, 2048);
+    shadow.mapSize.set(mobile ? 1024 : 2048, mobile ? 1024 : 2048);
     shadow.camera.left = -140;
     shadow.camera.right = 140;
     shadow.camera.top = 140;
@@ -314,6 +350,9 @@ export class World {
     this.applyLighting(welcome.lighting);
     this.applyCamera(welcome.camera);
     for (const part of welcome.parts) this.addPart(part, performance.now());
+    // The welcome's transfer time shouldn't count against the frame rate.
+    this.qualityFrames = 0;
+    this.qualitySince = performance.now();
   }
 
   applySnapshot(snapshot: Snapshot): void {
@@ -331,7 +370,7 @@ export class World {
     for (const update of snapshot.updatedTransforms) {
       const atom = this.parts.get(update.id);
       if (!atom) continue;
-      const current = this.trsAt(atom, now);
+      const current = atom.moving ? this.trsAt(atom, now) : atom.to;
       // `size` only rides along when it changed; remember it, so the next
       // move of an unchanged part still scales to the server's size.
       if (update.size) atom.snap.size = update.size;
@@ -342,6 +381,7 @@ export class World {
         scale: new THREE.Vector3(...atom.snap.size),
       };
       atom.changedAt = now;
+      atom.moving = true;
     }
     for (const part of snapshot.updatedProps) this.updatePart(part, now);
   }
@@ -425,6 +465,7 @@ export class World {
       from: copyTrs(trs),
       to: trs,
       changedAt: now,
+      moving: false,
     };
     this.parts.set(snap.id, atom);
     this.createVisual(atom);
@@ -436,12 +477,13 @@ export class World {
       this.addPart(snap, now);
       return;
     }
-    const current = this.trsAt(atom, now);
+    const current = atom.moving ? this.trsAt(atom, now) : atom.to;
     this.removeVisual(atom);
     atom.snap = snap;
     atom.from = current;
     atom.to = trsOf(snap);
     atom.changedAt = now;
+    atom.moving = true;
     this.createVisual(atom);
   }
 
@@ -474,16 +516,32 @@ export class World {
     if (snap.shape === SHAPE.FILE || snap.shape === SHAPE.TRUSS || snap.shape === SHAPE.ADORN) {
       return false;
     }
-    if (snap.transparency > 0.001) return false;
-    // `over` parts blend into what they cover (terrain seams); they need a
-    // blended material, not an opaque instance.
-    if (snap.over) return false;
-    if (snap.texture) return false;
-    const maps = snap.maps;
-    if (maps.color || maps.normal || maps.roughness || maps.metalness) return false;
-    if (snap.material === 288) return false; // Neon's glow is per colour
+    // Primitive geometry has no colour attribute; keep these as meshes.
     if (snap.vertexColors) return false;
     return true;
+  }
+
+  /** Everything that changes the shared material or its draw state. Two
+   * parts may share a pool only when every one of these matches. */
+  private poolKey(snap: PartSnapshot, geometry: string): string {
+    const maps = snap.maps;
+    const opacity = Math.round((1 - Math.min(Math.max(snap.transparency, 0), 1)) * 100);
+    return [
+      geometry,
+      snap.material,
+      snap.castShadow && opacity > 0 ? 1 : 0,
+      snap.doubleSided ? 1 : 0,
+      snap.light,
+      snap.onTop ? 1 : 0,
+      opacity,
+      snap.over ? 1 : 0,
+      snap.texture ?? "",
+      maps.color ?? "",
+      maps.normal ?? "",
+      maps.roughness ?? "",
+      maps.metalness ?? "",
+      Math.round(snap.reflectance * 10),
+    ].join("|");
   }
 
   private createVisual(atom: Atom): void {
@@ -491,6 +549,7 @@ export class World {
       this.createOverlay(atom);
       return;
     }
+    if (atom.snap.transparency >= 0.999) return;
     if (atom.snap.shape === SHAPE.TRUSS) {
       // Trusses are streams of bars; the browser draws a box for now.
       return;
@@ -506,18 +565,10 @@ export class World {
     this.createIndividual(atom);
   }
 
-  private createInstanced(atom: Atom): void {
+  private createInstanced(atom: Atom, geometry = geometryForShape(atom.snap.shape), prefix?: string): void {
     const snap = atom.snap;
-    const geometry = geometryForShape(snap.shape);
     if (!geometry) return;
-    const key = [
-      snap.shape,
-      snap.material,
-      snap.castShadow ? 1 : 0,
-      snap.doubleSided ? 1 : 0,
-      snap.light,
-      snap.onTop ? 1 : 0,
-    ].join("|");
+    const key = this.poolKey(snap, prefix ?? String(snap.shape));
     let list = this.pools.get(key);
     if (!list) {
       list = [];
@@ -525,7 +576,7 @@ export class World {
     }
     let pool = list.find((candidate) => !candidate.full);
     if (!pool) {
-      const material = instancedMaterial(snap);
+      const material = instancedMaterial(snap, this.textures);
       pool = new Pool(geometry, material, snap.castShadow);
       pool.mesh.renderOrder = snap.onTop ? 1000 : 0;
       list.push(pool);
@@ -534,7 +585,11 @@ export class World {
     const slot = pool.alloc();
     atom.pool = pool;
     atom.slot = slot;
-    pool.setColor(slot, srgb(snap.color));
+    pool.setMatrix(
+      slot,
+      new THREE.Matrix4().compose(atom.from.position, atom.from.quaternion, atom.from.scale),
+    );
+    pool.setColor(slot, tinted(snap.color, snap.maps.tint));
     pool.flush();
   }
 
@@ -550,6 +605,7 @@ export class World {
     atom.object = mesh;
     atom.ownedMaterial = material;
     this.scene.add(mesh);
+    this.place(atom, atom.from);
   }
 
   private createFile(atom: Atom): void {
@@ -557,17 +613,22 @@ export class World {
     if (!hash) return;
     const ready = () => {
       const current = this.parts.get(atom.snap.id);
-      if (current !== atom || atom.snap.mesh !== hash || atom.object) return;
+      if (current !== atom || atom.snap.mesh !== hash || atom.pool || atom.object) return;
       const geometry = this.meshes.get(hash);
       if (!geometry) return;
-      const material = partMaterial(atom.snap, this.textures);
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.castShadow = atom.snap.castShadow && atom.snap.transparency < 0.999;
-      mesh.receiveShadow = atom.snap.transparency < 0.999;
-      mesh.renderOrder = atom.snap.onTop ? 1000 : 0;
-      atom.object = mesh;
-      atom.ownedMaterial = material;
-      this.scene.add(mesh);
+      if (atom.snap.vertexColors) {
+        const material = partMaterial(atom.snap, this.textures);
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.castShadow = atom.snap.castShadow && atom.snap.transparency < 0.999;
+        mesh.receiveShadow = atom.snap.transparency < 0.999;
+        mesh.renderOrder = atom.snap.onTop ? 1000 : 0;
+        atom.object = mesh;
+        atom.ownedMaterial = material;
+        this.scene.add(mesh);
+        this.place(atom, atom.from);
+        return;
+      }
+      this.createInstanced(atom, geometry, `file:${hash}`);
     };
     atom.meshRequested = hash;
     this.meshes.load(hash, ready);
@@ -595,6 +656,7 @@ export class World {
         atom.object = mesh;
         atom.ownedMaterial = material;
         this.scene.add(mesh);
+        this.place(atom, atom.from);
       };
       if (hash && !this.meshes.get(hash)) {
         this.meshes.load(hash, build);
@@ -663,6 +725,7 @@ export class World {
     atom.ownedGeometry = geometry;
     atom.ownedMaterial = material;
     this.scene.add(mesh);
+    this.place(atom, atom.from);
   }
 
   private trsAt(atom: Atom, now: number): Trs {
@@ -674,26 +737,40 @@ export class World {
     };
   }
 
-  /** Give every part its transform for this frame, then light the sun
-   * around the camera and draw. */
+  private place(atom: Atom, trs: Trs): void {
+    if (atom.pool && atom.slot !== undefined) {
+      atom.pool.setMatrix(
+        atom.slot,
+        new THREE.Matrix4().compose(trs.position, trs.quaternion, trs.scale),
+      );
+    } else if (atom.object) {
+      if (atom.plane) {
+        const offset = atom.plane.offset.clone().applyQuaternion(trs.quaternion);
+        atom.object.position.copy(trs.position).add(offset);
+        atom.object.quaternion.copy(trs.quaternion).multiply(atom.plane.turn);
+        atom.object.scale.set(1, 1, 1);
+      } else {
+        atom.object.position.copy(trs.position);
+        atom.object.quaternion.copy(trs.quaternion);
+        atom.object.scale.copy(trs.scale);
+      }
+    }
+  }
+
+  /** Give moving parts their transform for this frame, then light the sun
+   * around the camera and draw. Static parts already hold their final
+   * matrix, so they cost nothing per frame. */
   update(now: number): void {
     for (const atom of this.parts.values()) {
-      const trs = this.trsAt(atom, now);
-      if (atom.pool && atom.slot !== undefined) {
-        const matrix = new THREE.Matrix4().compose(trs.position, trs.quaternion, trs.scale);
-        atom.pool.mesh.setMatrixAt(atom.slot, matrix);
-      } else if (atom.object) {
-        if (atom.plane) {
-          const offset = atom.plane.offset.clone().applyQuaternion(trs.quaternion);
-          atom.object.position.copy(trs.position).add(offset);
-          atom.object.quaternion.copy(trs.quaternion).multiply(atom.plane.turn);
-          atom.object.scale.set(1, 1, 1);
-        } else {
-          atom.object.position.copy(trs.position);
-          atom.object.quaternion.copy(trs.quaternion);
-          atom.object.scale.copy(trs.scale);
-        }
+      if (!atom.moving) continue;
+      let trs: Trs;
+      if (now - atom.changedAt >= SNAPSHOT_MS) {
+        trs = atom.to;
+        atom.moving = false;
+      } else {
+        trs = this.trsAt(atom, now);
       }
+      this.place(atom, trs);
     }
     for (const list of this.pools.values()) {
       for (const pool of list) pool.flush();
@@ -701,6 +778,35 @@ export class World {
     if (this.lighting) this.sunPosition(new THREE.Vector3(...this.lighting.sunDirection));
     this.sky.mesh.position.copy(this.camera.position);
     this.renderer.render(this.scene, this.camera);
+    this.adapt(now);
+  }
+
+  /** Trade resolution for frame rate, within the device's pixel ratio and
+   * a floor that keeps the image readable. */
+  private adapt(now: number): void {
+    if (!this.adaptive) return;
+    if (document.hidden) {
+      this.qualityFrames = 0;
+      this.qualitySince = now;
+      return;
+    }
+    this.qualityFrames++;
+    const elapsed = now - this.qualitySince;
+    if (elapsed < 2000) return;
+    const fps = (this.qualityFrames * 1000) / elapsed;
+    this.qualityFrames = 0;
+    this.qualitySince = now;
+    const floor = 0.75;
+    if (fps < 48 && this.pixelRatio > floor + 0.001) {
+      this.setPixelRatio(Math.max(floor, this.pixelRatio - 0.15));
+    } else if (fps > 57 && this.pixelRatio < this.maxPixelRatio - 0.001) {
+      this.setPixelRatio(Math.min(this.maxPixelRatio, this.pixelRatio + 0.1));
+    }
+  }
+
+  private setPixelRatio(value: number): void {
+    this.pixelRatio = value;
+    this.renderer.setPixelRatio(value);
   }
 }
 

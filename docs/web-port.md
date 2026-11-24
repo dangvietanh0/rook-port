@@ -46,9 +46,16 @@ cd web-client && npx tsc --noEmit && npm run build
 
 `.github/workflows/web-port.yml` runs the heavier checks on GitHub's
 machines: `cargo fmt --check`, `cargo clippy -p rook-web-server
---all-targets -- -D warnings`, a release build, and the client's type check
-and production build. Upstream's `check.yml` still covers the rest of the
-workspace.
+--all-targets -- -D warnings`, a release build, a startup smoke test, and
+the client's type check and production build. The smoke test starts the
+built server against a generated place and reads `/api/health`, the
+WebSocket welcome (with parts and the scripted ScreenGui) and the first
+snapshot. Upstream's `check.yml` still covers the rest of the workspace.
+
+The workflow also cross-compiles the server for `aarch64-unknown-linux-gnu`
+on an Ubuntu 24.04 runner and uploads the `rook-web-server-aarch64`
+artifact. The runner's glibc is the ceiling for the binary, so hosts older
+than 24.04 need an older runner rather than a newer one.
 
 ## Protocol
 

@@ -392,10 +392,8 @@ impl<'a> Session<'a> {
     fn gui_tree(&self) -> (u64, Vec<GuiNode>) {
         let mut world = self.game.view().runtime().world_mut();
         let world = &mut *world;
-        let generation = world.gui.generation();
-        let dom = &world.dom;
-        let gui = &mut world.gui;
-        (generation, crate::gui::tree(dom, gui))
+        let nodes = crate::gui::tree(&mut world.dom, &mut world.gui);
+        (world.gui.generation(), nodes)
     }
 
     /// The GUI tree when it changed since the last snapshot.
