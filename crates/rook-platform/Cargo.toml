@@ -23,11 +23,14 @@ native = [
 ]
 
 [dependencies]
-arboard = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 keyring-core = { workspace = true, optional = true }
 rustc-hash.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# arboard has no Android backend; the app's clipboard is empty there.
+arboard = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_Console"] }

@@ -43,6 +43,20 @@ pub use camera::initial_camera;
 pub use content::installed::Installed;
 pub use frame::ToRender;
 
+/// One entry [`SceneCache`] draws, as a host that streams the scene rather
+/// than handing it to the renderer reads it: the instance the entry belongs
+/// to, which of that instance's layers it is (0 is the part itself; Decals
+/// and Textures follow), and the look.
+#[derive(Debug, Clone, Copy)]
+pub struct DrawnEntry<'a> {
+    /// Where the entry is in [`SceneCache::scene`]'s parts, which is how
+    /// the renderer names it.
+    pub index: usize,
+    pub id: InstanceId,
+    pub layer: u32,
+    pub part: &'a PartInstance,
+}
+
 use adornments::floor_wire::Floors;
 use content::pending::*;
 use content::report::Report;
@@ -262,5 +276,42 @@ impl SceneCache {
 
     pub(crate) fn take_lighting_change(&mut self) -> bool {
         std::mem::take(&mut self.lighting_changed)
+    }
+
+    /// Every entry the scene draws, with the instance it belongs to and
+    /// its layer (0 is the part; its Decals and Textures follow in draw
+    /// order). Hosts that stream the scene rather than draw it read this:
+    /// the web server's snapshot extractor.
+    pub fn drawn_entries(&self) -> impl Iterator<Item = DrawnEntry<'_>> + '_ {
+        let parts = &self.scene.parts;
+        let layers = &self.layers;
+        let adornment_layers = &self.adornment_layers;
+        self.index.iter().flat_map(move |(&id, &base)| {
+            let images = layers.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+            let adornments = adornment_layers.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+            std::iter::once(DrawnEntry {
+                index: base,
+                id,
+                layer: 0,
+                part: &parts[base],
+            })
+            .chain(images.iter().enumerate().map(move |(n, &i)| DrawnEntry {
+                index: i,
+                id,
+                layer: u32::try_from(n + 1).unwrap_or(u32::MAX),
+                part: &parts[i],
+            }))
+            .chain(
+                adornments
+                    .iter()
+                    .enumerate()
+                    .map(move |(n, &i)| DrawnEntry {
+                        index: i,
+                        id,
+                        layer: u32::try_from(images.len() + n + 1).unwrap_or(u32::MAX),
+                        part: &parts[i],
+                    }),
+            )
+        })
     }
 }

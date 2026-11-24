@@ -221,6 +221,17 @@ impl Finish {
 }
 
 impl Game {
+    /// The place's name, as the window calls it.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The camera the place was saved with; a host that draws without the
+    /// window uses it before scripts drive one.
+    pub fn saved_camera(&self) -> Camera {
+        self.saved_camera
+    }
+
     /// Load a place and start it, waiting until it has.
     pub fn load(path: &Path, setup: &Setup) -> anyhow::Result<Self> {
         let loading = Loading::begin(path, setup)?;
@@ -230,14 +241,14 @@ impl Game {
         }
     }
     /// The DataModel the window shows.
-    pub(crate) fn view(&self) -> &DataModel {
+    pub fn view(&self) -> &DataModel {
         match &self.mode {
             Mode::Play { client, .. } => client.client(),
             Mode::Run(host) => host.server(),
         }
     }
 
-    pub(crate) fn view_mut(&mut self) -> &mut DataModel {
+    pub fn view_mut(&mut self) -> &mut DataModel {
         match &mut self.mode {
             Mode::Play { client, .. } => client.client_mut(),
             Mode::Run(host) => host.server_mut(),
@@ -246,6 +257,7 @@ impl Game {
 
     /// Whether the window's DataModel has anything a mixer could play
     /// ([`DataModel::hears_anything`]).
+    #[cfg(feature = "window")]
     pub(crate) fn hears_anything(&self) -> bool {
         self.view().hears_anything()
     }
@@ -258,7 +270,7 @@ impl Game {
     }
 
     /// Send window input to the local player's client (Run mode has no player).
-    pub(crate) fn input(&mut self, event: InputEvent) {
+    pub fn input(&mut self, event: InputEvent) {
         if let Mode::Play { server, client } = &mut self.mode {
             for msg in client.input(event) {
                 server.deliver(msg);
@@ -266,7 +278,7 @@ impl Game {
         }
     }
 
-    pub(crate) fn set_viewport(&mut self, width: u32, height: u32) {
+    pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.view_mut().set_viewport(width, height);
     }
 
@@ -299,7 +311,7 @@ impl Game {
     }
 
     /// Let the server keep its own 60 Hz pace (Play mode), for live play.
-    pub(crate) fn free_run(&self) {
+    pub fn free_run(&self) {
         if let Mode::Play { server, .. } = &self.mode {
             server.run(true);
         }
@@ -309,7 +321,7 @@ impl Game {
     /// server sent, then step the client once, `dt` long, as Roblox runs a
     /// client frame per drawn frame. In Run mode the server steps here at
     /// 60 Hz, catching up at most four steps.
-    pub(crate) fn advance(&mut self, dt: f64) {
+    pub fn advance(&mut self, dt: f64) {
         match &mut self.mode {
             Mode::Play { server, client } => {
                 let start = std::time::Instant::now();

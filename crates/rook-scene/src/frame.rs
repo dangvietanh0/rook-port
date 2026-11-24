@@ -186,6 +186,20 @@ pub struct ToRender {
 }
 
 impl ToRender {
+    /// The images that finished loading this frame, for a host that serves
+    /// them itself rather than uploading them to a renderer (the web
+    /// server). Taking them means the renderer would not get them, so this
+    /// is only for frames no renderer takes.
+    pub fn take_images(&mut self) -> Vec<(ImageHash, Arc<Image>)> {
+        std::mem::take(&mut self.images)
+    }
+
+    /// The mesh files dropped this frame, for a host that caches them
+    /// (the web server) to forget them too.
+    pub fn take_dropped_meshes(&mut self) -> Vec<MeshHash> {
+        std::mem::take(&mut self.dropped)
+    }
+
     pub fn changed(&self) -> bool {
         self.gui.laid_out()
             || !matches!(self.change, SceneChange::None)
