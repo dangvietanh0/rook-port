@@ -113,7 +113,7 @@ fn collect_screens(dom: &Dom, parent: InstanceId, out: &mut Vec<InstanceId>) {
 
 fn name_of(dom: &Dom, id: InstanceId) -> String {
     dom.str_property(id, "Name")
-        .map(|name| name.into_owned())
+        .map(std::borrow::Cow::into_owned)
         .unwrap_or_default()
 }
 

@@ -99,9 +99,9 @@ pub(crate) fn mesh_blob(mesh: &Mesh) -> Vec<u8> {
     let has_normals = mesh.normals.len() == n;
     let has_uvs = mesh.uvs.len() == n;
     let has_colors = mesh.colors.len() == n;
-    let flags = u32::from(has_normals) * FLAG_NORMALS
-        | u32::from(has_uvs) * FLAG_UVS
-        | u32::from(has_colors) * FLAG_COLORS;
+    let flags = (u32::from(has_normals) * FLAG_NORMALS)
+        | (u32::from(has_uvs) * FLAG_UVS)
+        | (u32::from(has_colors) * FLAG_COLORS);
 
     let floats = n * 3 + if has_normals { n * 3 } else { 0 } + if has_uvs { n * 2 } else { 0 };
     let mut out = Vec::with_capacity(

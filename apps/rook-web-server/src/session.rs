@@ -5,7 +5,7 @@
 //! talks to it through a command channel and a broadcast of already
 //! serialized frames, so the async side never touches a `DataModel`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -133,7 +133,7 @@ pub(crate) fn spawn(
     std::thread::Builder::new()
         .name("rook-session".to_owned())
         .spawn(move || {
-            let result = run(place, play, content, &shared, &frames, &commands);
+            let result = run(&place, play, content, &shared, &frames, &commands);
             if let Err(error) = &result {
                 let message = format!("{error:#}");
                 eprintln!("session failed: {message}");
@@ -150,7 +150,7 @@ pub(crate) fn spawn(
 }
 
 fn run(
-    place: PathBuf,
+    place: &Path,
     play: bool,
     content: Arc<Resolver>,
     shared: &Arc<Mutex<Shared>>,
@@ -166,14 +166,14 @@ fn run(
         core_scripts: None,
         user_settings: None,
     };
-    let mut game = Game::load(&place, &setup)?;
+    let mut game = Game::load(place, &setup)?;
     // The server thread paces itself at 60 Hz, as Play mode does in the
     // window; `advance` then only drains what it sent.
     game.free_run();
     game.set_viewport(1280, 720);
     let saved_camera = game.saved_camera();
 
-    let mut session = Session::new(game, saved_camera, content, shared, frames);
+    let mut session = Session::new(game, saved_camera, &content, shared, frames);
     session.prime()?;
     session.run(commands)
 }
@@ -208,12 +208,12 @@ impl<'a> Session<'a> {
     fn new(
         mut game: Game,
         saved_camera: rook_render::Camera,
-        content: Arc<Resolver>,
+        content: &Arc<Resolver>,
         shared: &'a Arc<Mutex<Shared>>,
         frames: &'a broadcast::Sender<Vec<u8>>,
     ) -> Self {
         let focus = saved_camera.position;
-        let cache = SceneCache::for_data_model(game.view_mut(), &content, focus);
+        let cache = SceneCache::for_data_model(game.view_mut(), content, focus);
         Self {
             game,
             cache,
@@ -381,7 +381,7 @@ impl<'a> Session<'a> {
 
     /// The local player's ScreenGuis as HTML nodes, and the generation they
     /// are at.
-    fn gui_tree(&mut self) -> (u64, Vec<GuiNode>) {
+    fn gui_tree(&self) -> (u64, Vec<GuiNode>) {
         let mut world = self.game.view().runtime().world_mut();
         let world = &mut *world;
         let generation = world.gui.generation();

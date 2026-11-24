@@ -257,6 +257,8 @@ opt-level = 1
 opt-level = 1
 [profile.dev.package.rook-types]
 opt-level = 1
+[profile.dev.package.rook-web-server]
+opt-level = 1
 [profile.dev.package.xtask]
 opt-level = 1
 
