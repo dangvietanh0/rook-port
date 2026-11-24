@@ -133,18 +133,13 @@ pub(crate) fn spawn(
     std::thread::Builder::new()
         .name("rook-session".to_owned())
         .spawn(move || {
-            let result = run(&place, play, &content, &shared, &frames, &commands);
+            let result = run(&place, play, &content, &shared, &frames, &commands, &ready);
             if let Err(error) = &result {
                 let message = format!("{error:#}");
                 eprintln!("session failed: {message}");
+                let mut shared = shared.lock().expect("session shared");
+                shared.welcome = None;
             }
-            let failed = result.is_err();
-            let _ = ready.send(result);
-            if !failed {
-                return;
-            }
-            let mut shared = shared.lock().expect("session shared");
-            shared.welcome = None;
         })
         .expect("spawn the session thread")
 }
@@ -156,6 +151,7 @@ fn run(
     shared: &Arc<Mutex<Shared>>,
     frames: &broadcast::Sender<Vec<u8>>,
     commands: &Receiver<Command>,
+    ready: &Sender<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     let setup = Setup {
         play,
@@ -166,7 +162,13 @@ fn run(
         core_scripts: None,
         user_settings: None,
     };
-    let mut game = Game::load(place, &setup)?;
+    let mut game = match Game::load(place, &setup) {
+        Ok(game) => game,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return Ok(());
+        }
+    };
     // The server thread paces itself at 60 Hz, as Play mode does in the
     // window; `advance` then only drains what it sent.
     game.free_run();
@@ -174,7 +176,13 @@ fn run(
     let saved_camera = game.saved_camera();
 
     let mut session = Session::new(game, saved_camera, content, shared, frames);
-    session.prime()?;
+    if let Err(error) = session.prime() {
+        let _ = ready.send(Err(error));
+        return Ok(());
+    }
+    // The HTTP server waits for this before it binds, so the first browser
+    // already has the whole scene.
+    let _ = ready.send(Ok(()));
     session.run(commands)
 }
 
@@ -572,10 +580,14 @@ impl<'a> Session<'a> {
             self.previous.insert(entry.key, snap);
         }
 
+        let (mesh_count, image_count) = {
+            let shared = self.shared.lock().expect("session shared");
+            (shared.meshes.count(), shared.images.count())
+        };
         let stats = SessionStats {
             parts: self.previous.len(),
-            meshes: self.shared.lock().expect("session shared").meshes.count(),
-            images: self.shared.lock().expect("session shared").images.count(),
+            meshes: mesh_count,
+            images: image_count,
             server_tick: self.tick,
             simulated_seconds: self.game.view().now(),
         };
