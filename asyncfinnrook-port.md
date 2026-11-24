@@ -1,7 +1,6 @@
-````markdown
 # Kế hoạch Port `AsyncFinn/rook` sang Web (Phương án A: Headless Server + Three.js Client)
 
-## 1. Mục tiêu & Nguyên tắc Thiết kế
+## Mục tiêu & Nguyên tắc Thiết kế
 
 * **Tận dụng tối đa lõi của `AsyncFinn/rook`:** Không viết lại DataModel, Luau VM, Task Scheduler, Replication, Physics (Rapier 240Hz), Terrain hay Content Resolver. Giữ nguyên kiến trúc của `rook` và mở rộng thêm một app mới trong `apps/` để giữ khả năng đồng bộ/merge cập nhật từ upstream (`git pull`).
 * **Kiến trúc Server-Authoritative Simulation + Thin Web Client:**
@@ -14,7 +13,7 @@
 
 ---
 
-## 2. Kiến trúc Hệ thống
+## Kiến trúc Hệ thống
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -45,21 +44,21 @@
 
 ---
 
-## 3. Thiết kế Lớp Backend (`apps/rook-web-server` & Patch tối thiểu)
+## Thiết kế Lớp Backend (`apps/rook-web-server` & Patch tối thiểu)
 
-### 3.1. Chạy `rook-client` không phụ thuộc cửa sổ/GPU (`Headless Bridge`)
+### Chạy `rook-client` không phụ thuộc cửa sổ/GPU (`Headless Bridge`)
 * Tái sử dụng toàn bộ pipeline nạp `.rbxl`/`.rbxlx` và vòng lặp tick của `rook-client`.
 * Tách bỏ phần khởi tạo cửa sổ `winit` và `wgpu` Surface trong luồng chạy của `rook-web-server` (chỉ giữ lại các dữ liệu hình học/tài nguyên đã được `rook` giải mã ở CPU).
 * Quản lý vòng đời mỗi phiên preview: mở file `.rbxl` -> chạy game loop -> đóng phiên & giải phóng bộ nhớ khi client ngắt kết nối.
 
-### 3.2. Tích hợp API Key vào Content Resolver của `rook`
+### Tích hợp API Key vào Content Resolver của `rook`
 * Bổ sung header/query API Key của bạn vào HTTP client trong hệ thống tải Asset Delivery của `rook` khi resolve `rbxassetid://` / legacy URLs.
 * Tận dụng cơ chế **Disk Cache** sẵn có của `rook`: asset chỉ tải 1 lần cho mọi phiên chạy sau.
 * Mở HTTP endpoint `/api/assets/{asset_id}` trên Axum server:
   * Trả về ảnh (PNG/JPG/WebP/TGA convert sang PNG) và audio (OGG/MP3/WAV) trực tiếp từ disk cache (tránh CORS, ẩn hoàn toàn API Key).
   * Trả về **Mesh đã giải mã** dưới dạng binary buffer phẳng (`positions`, `normals`, `uvs`, `indices`) lấy thẳng từ bộ parser mesh của `rook`, giúp trình duyệt không phải tự giải mã định dạng `.mesh` hay CSG.
 
-### 3.3. Lớp trích xuất Snapshot & Dirty Tracking
+### Lớp trích xuất Snapshot & Dirty Tracking
 * **Initial Scene Snapshot:** Khi client vừa kết nối WebSocket, quét toàn bộ `Workspace`, `Lighting`, `Players.LocalPlayer.PlayerGui` từ client DataModel của `rook` để gửi trạng thái ban đầu:
   * Danh sách `Part` / `MeshPart` / `SpecialMesh` (`InstanceId`, shape, `Size`, `CFrame`, `Color3`, `Transparency`, `Material`, `MeshId`, `TextureID`, `Decals`).
   * Các `Terrain` chunk mesh đã dựng sẵn ở backend (`vertices`, `normals`, `colors/materialWeights`, `indices`).
@@ -74,9 +73,9 @@
 
 ---
 
-## 4. Thiết kế Đồ họa Three.js ("Vừa đủ giống Roblox")
+## Thiết kế Đồ họa Three.js ("Vừa đủ giống Roblox")
 
-### 4.1. Hệ màu & Ánh sáng (Khắc phục lỗi thô cứng và bóng đổ xấu)
+### Hệ màu & Ánh sáng (Khắc phục lỗi thô cứng và bóng đổ xấu)
 * **Không gian màu chuẩn:**
   * Bật `renderer.outputColorSpace = THREE.SRGBColorSpace`.
   * Sử dụng `THREE.ACESFilmicToneMapping` (exposure ~ `1.0`) hoặc `AgXToneMapping` để vùng sáng (đặc biệt vật liệu Neon/trắng) không bị cháy bệt.
@@ -91,7 +90,7 @@
   * Map `Lighting.FogStart`, `FogEnd`, `FogColor` vào `THREE.Fog`.
   * Dùng Skybox 6 mặt (tải từ cache hoặc fallback sky dome gradient theo `ClockTime`) làm background scene.
 
-### 4.2. Vật liệu & Bề mặt (`Material` vừa đủ đẹp, không nặng)
+### Vật liệu & Bề mặt (`Material` vừa đủ đẹp, không nặng)
 * Dùng `THREE.MeshStandardMaterial` làm chuẩn chung (tránh `MeshBasicMaterial` phẳng lì).
 * Tạo một bảng **Material Presets (~12–15 vật liệu phổ biến nhất)** với bộ texture tile nhẹ (`256x256` hoặc `512x512` diffuse + normal/roughness):
   * `SmoothPlastic`: `roughness: 0.45`, `metalness: 0.0`, không vân.
@@ -104,13 +103,13 @@
 * **`SurfaceAppearance`:** Nếu MeshPart có gắn PBR maps (`ColorMap`, `NormalMap`, `RoughnessMap`, `MetalnessMap`), tạo material riêng nạp các texture tương ứng từ `/api/assets/{id}`.
 * **`Decal` & `Texture`:** Render bằng một quad mỏng bám sát mặt `NormalId` tương ứng, bật `polygonOffset` (`polygonOffsetFactor: -1`) để tránh nhấp nháy z-fighting.
 
-### 4.3. Tối ưu Render & Hiệu năng Trình duyệt
+### Tối ưu Render & Hiệu năng Trình duyệt
 * **GPU Instancing (`THREE.InstancedMesh`):** Gom toàn bộ các Part có cùng `(Shape cơ bản, MaterialPreset)` vào chung `InstancedMesh` (hỗ trợ per-instance color và `CFrame` matrix), đảm bảo render hàng chục nghìn Part với rất ít Draw Calls.
 * **Xử lý Part bán trong suốt (`Transparency > 0`):** Tách riêng sang nhóm render transparent để không phá vỡ depth-sorting của nhóm Part đục.
 * **Nội suy chuyển động (Interpolation):** Client giữ buffer 2 snapshot gần nhất và `lerp`/`slerp` cho Part chuyển động + nhân vật để đạt 60–144 FPS mượt mà dù server stream ở 20–30Hz.
 * **Dọn dẹp bộ nhớ GPU:** Tự động gọi `.dispose()` cho `BufferGeometry`, `Material`, `Texture` khi nhận sự kiện `Destroyed` từ server.
 
-### 4.4. Terrain & UI Overlay
+### Terrain & UI Overlay
 * **Terrain:** Nhận trực tiếp lưới tam giác từng chunk từ `rook` (đã dựng sẵn từ `SmoothGrid`). Sử dụng `MeshStandardMaterial` với `vertexColors: true` (hoặc shader triplanar đơn giản pha 3 lớp màu/texture chính); phần nước (`Water`) dùng mặt phẳng bán trong suốt với normal map sóng cuộn UV nhẹ.
 * **UI (`ScreenGui` -> HTML/CSS):**
   * Không vẽ chữ/UI bằng Three.js.
@@ -119,7 +118,7 @@
 
 ---
 
-## 5. Lộ trình Triển khai theo Giai đoạn
+## Lộ trình Triển khai theo Giai đoạn
 
 ### Giai đoạn 1: Khung Bridge Headless & Static Scene trên Three.js
 * Tạo crate/app mới `apps/rook-web-server` trong workspace của `rook`.
@@ -150,7 +149,7 @@
 
 ---
 
-## 6. Tiêu chuẩn Nghiệm thu Đồ họa & Trải nghiệm
+## Tiêu chuẩn Nghiệm thu Đồ họa & Trải nghiệm
 
 | Hạng mục | Tiêu chuẩn đạt |
 | :--- | :--- |
@@ -158,4 +157,3 @@
 | **Chất liệu** | Phân biệt trực quan được các nhóm vật liệu chính (`SmoothPlastic`, `Studs`, `Wood`, `Metal`, `Glass`, `Neon` phát sáng nhẹ); texture không bị kéo méo khi Part dài/rộng khác nhau. |
 | **Hiệu năng** | Map cỡ trung bình (20.000–50.000 Parts) duy trì mượt mà trên trình duyệt nhờ `InstancedMesh` và không bị rò rỉ VRAM khi script liên tục spawn/destroy Part. |
 | **Gameplay & UI** | Chạy được script Server/Client từ `rook`, điều khiển nhân vật không giật khựng, âm thanh phát đúng vị trí và tương tác được với giao diện `ScreenGui`. |
-````
