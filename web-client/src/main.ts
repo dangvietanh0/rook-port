@@ -76,6 +76,7 @@ const net = new Net(
     partsText = welcome.stats.parts.toLocaleString();
     updateStats();
     showTouchControls(playMode && touchCapable);
+    updateHint();
     loading.classList.add("hidden");
     welcomed = true;
     // The GUI was laid out at the server's viewport; match it to this one.
@@ -126,6 +127,16 @@ function setStatus(status: Status, detail: string): void {
 function showTouchControls(show: boolean): void {
   joystick.hidden = !show;
   jump.hidden = !show;
+}
+
+function updateHint(): void {
+  hint.textContent = playMode
+    ? touchCapable
+      ? "Drag to look · Joystick to move"
+      : "Drag to look · WASD to move · Space to jump"
+    : touchCapable
+      ? "Drag to look"
+      : "WASD/QE fly · drag to look · Shift fast";
 }
 
 function setStatsOpen(open: boolean): void {
