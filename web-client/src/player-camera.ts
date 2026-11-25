@@ -61,9 +61,9 @@ export class PlayerCamera {
     this.zoom(Math.exp(delta * 0.0018));
   }
 
-  /** Pinch scale: greater than 1 zooms out. */
+  /** Pinch scale: fingers apart (greater than 1) zoom in, as on Roblox. */
   pinch(scale: number): void {
-    this.zoom(scale);
+    if (scale > 0) this.zoom(1 / scale);
   }
 
   private zoom(scale: number): void {

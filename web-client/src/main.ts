@@ -121,6 +121,7 @@ function setStatus(status: Status, detail: string): void {
   statusDot.className = status === "connected" ? "dot ok" : status === "failed" ? "dot bad" : "dot";
   // Before the first welcome the loading screen carries the message.
   toast.hidden = !welcomed || status === "connected";
+  toast.textContent = status === "failed" ? detail : "Reconnecting…";
   updateStats();
 }
 
