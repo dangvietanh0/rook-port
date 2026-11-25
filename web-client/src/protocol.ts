@@ -32,6 +32,8 @@ export interface PartSnapshot {
   id: number;
   parent: number | null;
   layer: number;
+  /** `BasePart.Anchored`; terrain is anchored, image layers are not. */
+  anchored: boolean;
   shape: number;
   mesh: string | null;
   position: Vec3;
@@ -140,6 +142,15 @@ export interface SessionStats {
   simulatedSeconds: number;
 }
 
+export interface PlayerInfo {
+  /** Net id of the HumanoidRootPart. */
+  root: number | null;
+  /** Net id of the Head. */
+  head: number | null;
+  /** Every drawn character part, image layers included. */
+  parts: number[];
+}
+
 export interface Welcome {
   place: string;
   tick: number;
@@ -150,6 +161,11 @@ export interface Welcome {
   camera: CameraSnapshot;
   gui: GuiNode[];
   stats: SessionStats;
+  player: PlayerInfo | null;
+  /** This session has a local player at all; `--run` has none. */
+  play: boolean;
+  /** The injected movement controller is running. */
+  controller: boolean;
 }
 
 export interface TransformUpdate {
@@ -171,6 +187,7 @@ export interface Snapshot {
   lighting?: Lighting;
   camera?: CameraSnapshot;
   gui?: GuiNode[] | null;
+  player: PlayerInfo | null;
   stats: SessionStats;
 }
 
@@ -190,6 +207,7 @@ export type ClientMessage =
   | { kind: "focus"; focused: boolean }
   | { kind: "resize"; width: number; height: number }
   | { kind: "camera"; position: Vec3 }
+  | { kind: "move"; x: number; z: number }
   | { kind: "ping"; t: number };
 
 export const SHAPE = {

@@ -117,6 +117,15 @@ def wait_for_health(server: subprocess.Popen, log: Path) -> dict:
     raise SystemExit(f"the server didn't answer /api/health:\n{log.read_text()}")
 
 
+def apply_snapshot(positions: dict[int, list[float]], snapshot: dict) -> None:
+    for part in snapshot.get("created", []):
+        positions[part["id"]] = part["position"]
+    for part in snapshot.get("updatedProps", []):
+        positions[part["id"]] = part["position"]
+    for update in snapshot.get("updatedTransforms", []):
+        positions[update["id"]] = update["position"]
+
+
 async def read_messages() -> None:
     async with websockets.connect(f"ws://127.0.0.1:{PORT}/ws") as socket:
         welcome = msgpack.unpackb(await asyncio.wait_for(socket.recv(), 30), raw=False)
@@ -124,6 +133,8 @@ async def read_messages() -> None:
         scene = welcome["welcome"]
         assert scene["parts"], "the welcome has no parts"
         assert scene["gui"], "the welcome has no ScreenGui"
+        assert scene["play"] is True, "the smoke place should run in Play mode"
+        assert scene["controller"] is True, "the web controller should be active"
         print(
             "welcome",
             scene["place"],
@@ -133,9 +144,49 @@ async def read_messages() -> None:
             "gui roots",
         )
 
+        positions: dict[int, list[float]] = {part["id"]: part["position"] for part in scene["parts"]}
         snapshot = msgpack.unpackb(await asyncio.wait_for(socket.recv(), 30), raw=False)
         assert snapshot["kind"] == "snapshot", snapshot["kind"]
         print("snapshot", snapshot["snapshot"]["tick"])
+        apply_snapshot(positions, snapshot["snapshot"])
+
+        # The character can spawn a frame after the welcome; keep reading
+        # until its root has a net id.
+        deadline = time.monotonic() + 20
+        player = scene.get("player")
+        while player is None and time.monotonic() < deadline:
+            snapshot = msgpack.unpackb(await asyncio.wait_for(socket.recv(), 30), raw=False)
+            apply_snapshot(positions, snapshot["snapshot"])
+            player = snapshot["snapshot"].get("player")
+        assert player is not None, "the character never appeared"
+        root = player["root"]
+        assert root is not None, "the character has no HumanoidRootPart"
+        assert root in positions, "the root part was never sent"
+        start = positions[root]
+        print("player root", root, "at", start)
+
+        # Hold a world-space direction. The browser sends this at 30 Hz;
+        # the session's watchdog expects the stream.
+        for _ in range(20):
+            await socket.send(msgpack.packb({"kind": "move", "x": 1.0, "z": 0.0}))
+            await asyncio.sleep(0.05)
+        for _ in range(20):
+            snapshot = msgpack.unpackb(await asyncio.wait_for(socket.recv(), 30), raw=False)
+            apply_snapshot(positions, snapshot["snapshot"])
+        moved = positions[root]
+        distance = sum((moved[i] - start[i]) ** 2 for i in range(3)) ** 0.5
+        assert distance > 0.25, f"the character barely moved: {distance}"
+        print("moved", round(distance, 2), "studs")
+
+        # Zero stops it.
+        await socket.send(msgpack.packb({"kind": "move", "x": 0.0, "z": 0.0}))
+        for _ in range(12):
+            snapshot = msgpack.unpackb(await asyncio.wait_for(socket.recv(), 30), raw=False)
+            apply_snapshot(positions, snapshot["snapshot"])
+        stopped = positions[root]
+        drift = sum((stopped[i] - moved[i]) ** 2 for i in range(3)) ** 0.5
+        assert drift < 1.0, f"the character kept walking: {drift}"
+        print("stopped", round(drift, 2), "studs after zero")
 
 
 def main() -> None:
