@@ -504,7 +504,7 @@ impl<'a> Session<'a> {
         self.write_move(Vec3::ZERO);
     }
 
-    fn write_move(&mut self, vector: Vec3) {
+    fn write_move(&self, vector: Vec3) {
         let mut world = self.game.view().runtime().world_mut();
         let dom = &mut world.dom;
         let Some(player) = dom.local_player() else {

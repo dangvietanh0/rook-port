@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b0e13" />
     <title>Rook</title>
     <link rel="icon" href="/rook.svg" type="image/svg+xml" />
   </head>
@@ -10,18 +14,45 @@
     <canvas id="viewport"></canvas>
     <div id="gui"></div>
     <div id="hud">
-      <div class="row"><span class="label">Place</span><span id="place">-</span></div>
-      <div class="row"><span class="label">Parts</span><span id="parts">0</span></div>
-      <div class="row"><span class="label">Ping</span><span id="ping">-</span></div>
-      <div class="row"><span class="label">FPS</span><span id="fps">-</span></div>
-      <div id="status" class="ok">connecting</div>
+      <div id="topbar">
+        <div id="brand" aria-hidden="true">
+          <img src="/rook.svg" alt="" />
+        </div>
+        <button id="stats-button" type="button" aria-expanded="false" aria-controls="stats-panel" title="Stats">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 19V11M10 19V6M15 19V9M20 19V4" />
+          </svg>
+          <span id="status-dot" class="dot"></span>
+        </button>
+        <button id="fullscreen-button" type="button" title="Fullscreen" aria-label="Fullscreen" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+          </svg>
+        </button>
+      </div>
+      <div id="stats-panel" hidden>
+        <div class="row"><span>FPS</span><span id="fps">-</span></div>
+        <div class="row"><span>Ping</span><span id="ping">-</span></div>
+        <div class="row"><span>Place</span><span id="place">-</span></div>
+        <div class="row"><span>Parts</span><span id="parts">0</span></div>
+        <div id="status" class="ok">connecting</div>
+      </div>
+      <div id="joystick" hidden>
+        <div id="joystick-thumb"></div>
+      </div>
+      <button id="jump" type="button" aria-label="Jump" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" />
+        </svg>
+      </button>
+      <div id="hint">Drag to look · WASD to move · Space to jump</div>
+      <div id="toast" hidden>Reconnecting…</div>
     </div>
-    <div id="controls">
-      <strong>WASD</strong> move &middot; <strong>Q/E</strong> down/up &middot;
-      <strong>Shift</strong> fast &middot; <strong>drag</strong> look &middot;
-      <strong>click</strong> lock mouse
+    <div id="loading">
+      <img class="mark" src="/rook.svg" alt="" />
+      <div class="spinner"></div>
+      <p>Loading the place…</p>
     </div>
-    <div id="loading"><div class="spinner"></div><p>Loading the place…</p></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

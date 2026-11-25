@@ -1,8 +1,11 @@
 :root {
   color-scheme: dark;
-  --panel: rgba(14, 17, 22, 0.78);
+  --panel: rgba(14, 17, 22, 0.74);
+  --panel-strong: rgba(14, 17, 22, 0.9);
+  --line: rgba(255, 255, 255, 0.12);
   --text: #e8edf4;
   --muted: #9aa7b8;
+  --accent: #6aa8ff;
   --ok: #63d391;
   --warn: #f0c14b;
   --bad: #f06d6d;
@@ -18,15 +21,26 @@ body {
   margin: 0;
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;
   background: #0b0e13;
   color: var(--text);
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 #viewport {
+  position: fixed;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
   outline: none;
+  touch-action: none;
 }
 
 #gui {
@@ -72,35 +86,134 @@ body {
 
 #hud {
   position: fixed;
-  top: 14px;
-  left: 14px;
+  inset: 0;
   z-index: 6;
-  min-width: 190px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--panel);
-  backdrop-filter: blur(8px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  font-size: 12px;
-  line-height: 1.65;
   pointer-events: none;
   user-select: none;
 }
 
-#hud .row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
+[hidden] {
+  display: none !important;
 }
 
-#hud .label {
+/* Top-left glass pill, like Roblox's menu bar. */
+#topbar {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 52px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  pointer-events: auto;
+}
+
+#brand {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+}
+
+#brand img {
+  width: 30px;
+  height: 30px;
+}
+
+#topbar button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+#topbar button:hover,
+#topbar button[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#topbar button:active {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+#topbar svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dot {
+  position: absolute;
+  right: 9px;
+  bottom: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 2px rgba(14, 17, 22, 0.8);
+}
+
+.dot.ok { background: var(--ok); }
+.dot.bad { background: var(--bad); }
+
+#stats-panel {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 68px);
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  min-width: 196px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-strong);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  line-height: 1.7;
+  pointer-events: auto;
+}
+
+#stats-panel .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+#stats-panel .row span:first-child {
   color: var(--muted);
+}
+
+#stats-panel .row span:last-child {
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #status {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--line);
   font-weight: 600;
 }
 
@@ -108,25 +221,116 @@ body {
 #status.warn { color: var(--warn); }
 #status.bad { color: var(--bad); }
 
-#controls {
+/* Touch joystick: a large hit area around a smaller ring. */
+#joystick {
   position: fixed;
-  bottom: 14px;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 14px);
+  left: calc(env(safe-area-inset-left, 0px) + 14px);
+  width: 156px;
+  height: 156px;
+  border-radius: 50%;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+#joystick::before {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.24);
+  border-radius: 50%;
+  background: rgba(10, 14, 20, 0.3);
+  box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.2);
+}
+
+#joystick-thumb {
+  position: absolute;
+  top: 50%;
   left: 50%;
+  width: 56px;
+  height: 56px;
+  margin: -28px 0 0 -28px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 50%;
+  background: rgba(232, 237, 244, 0.26);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+  will-change: transform;
+}
+
+#joystick.active #joystick-thumb {
+  background: rgba(232, 237, 244, 0.36);
+}
+
+#jump {
+  position: fixed;
+  right: calc(env(safe-area-inset-right, 0px) + 22px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 26px);
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  background: rgba(10, 14, 20, 0.32);
+  color: #fff;
+  pointer-events: auto;
+  touch-action: none;
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+#jump svg {
+  width: 34px;
+  height: 34px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#jump:active,
+#jump.pressed {
+  transform: scale(0.94);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#hint {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
   transform: translateX(-50%);
-  z-index: 6;
   padding: 7px 14px;
+  border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--panel);
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
-  pointer-events: none;
-  user-select: none;
+  transition: opacity 260ms ease;
 }
 
-#controls strong {
-  color: var(--text);
+#hint.gone {
+  opacity: 0;
+}
+
+body.touch #hint {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 180px);
+}
+
+#toast {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-strong);
+  color: var(--warn);
+  font-size: 13px;
   font-weight: 600;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 #loading {
@@ -136,7 +340,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: 16px;
   background: #0b0e13;
   transition: opacity 0.4s ease;
   z-index: 10;
@@ -145,6 +349,12 @@ body {
 #loading.hidden {
   opacity: 0;
   pointer-events: none;
+}
+
+#loading .mark {
+  width: 64px;
+  height: 64px;
+  opacity: 0.9;
 }
 
 #loading p {
@@ -157,11 +367,58 @@ body {
   width: 30px;
   height: 30px;
   border: 3px solid rgba(255, 255, 255, 0.15);
-  border-top-color: var(--ok);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@media (pointer: coarse) {
+  body:not(.touch) #joystick,
+  body:not(.touch) #jump {
+    display: none;
+  }
+}
+
+@media (orientation: portrait) {
+  #topbar {
+    height: 48px;
+  }
+  #brand,
+  #topbar button {
+    width: 40px;
+    height: 40px;
+  }
+  #joystick {
+    width: 136px;
+    height: 136px;
+  }
+  #joystick::before {
+    inset: 10px;
+  }
+  #joystick-thumb {
+    width: 50px;
+    height: 50px;
+    margin: -25px 0 0 -25px;
+  }
+  #jump {
+    width: 68px;
+    height: 68px;
+  }
+  #hint {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

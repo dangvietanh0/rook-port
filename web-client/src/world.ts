@@ -6,6 +6,7 @@ import type {
   CameraSnapshot,
   Lighting,
   PartSnapshot,
+  PlayerInfo,
   Snapshot,
   Welcome,
 } from "./protocol";
@@ -14,11 +15,47 @@ import { MeshCache, Textures } from "./mesh";
 import { decalMaterial, instancedMaterial, partMaterial, srgb, tinted } from "./materials";
 
 const SNAPSHOT_MS = 50;
+/** Camera collision cell size in studs, and the span past which a box is
+ * checked on every ray instead of being filed into cells. */
+const COLLISION_CELL = 8;
+const COLLISION_MAX_CELLS = 8;
+const UNIT_BOX = new THREE.Box3(
+  new THREE.Vector3(-0.5, -0.5, -0.5),
+  new THREE.Vector3(0.5, 0.5, 0.5),
+);
+const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 
-interface Trs {
+export interface Trs {
   position: THREE.Vector3;
   quaternion: THREE.Quaternion;
   scale: THREE.Vector3;
+}
+
+/** The axis-aligned box around a part's oriented box. */
+function boxOf(trs: Trs): THREE.Box3 {
+  const matrix = new THREE.Matrix4().compose(trs.position, trs.quaternion, trs.scale);
+  return UNIT_BOX.clone().applyMatrix4(matrix);
+}
+
+/** How far along `direction` a box is first hit, or null. */
+function rayBox(origin: THREE.Vector3, direction: THREE.Vector3, length: number, box: THREE.Box3): number | null {
+  let near = 0;
+  let far = length;
+  for (const axis of ["x", "y", "z"] as const) {
+    const start = origin[axis];
+    const delta = direction[axis];
+    if (Math.abs(delta) < 1e-8) {
+      if (start < box.min[axis] || start > box.max[axis]) return null;
+      continue;
+    }
+    let t1 = (box.min[axis] - start) / delta;
+    let t2 = (box.max[axis] - start) / delta;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    near = Math.max(near, t1);
+    far = Math.min(far, t2);
+    if (near > far) return null;
+  }
+  return near;
 }
 
 function trsOf(snap: PartSnapshot): Trs {
@@ -273,8 +310,17 @@ export class World {
   readonly textures = new Textures();
   readonly meshes = new MeshCache();
   cameraScripted = false;
+  /** The local character as the last welcome or snapshot described it. */
+  player: PlayerInfo | null = null;
+  readonly collisionEnabled: boolean;
 
   private parts = new Map<number, Atom>();
+  private localParts = new Set<number>();
+  private hidden = new Set<number>();
+  private collisionCells = new Map<string, Set<number>>();
+  private collisionBoxes = new Map<number, THREE.Box3>();
+  private collisionCellsOf = new Map<number, string[]>();
+  private collisionLarge = new Map<number, THREE.Box3>();
   private pools = new Map<string, Pool[]>();
   private hemisphere = new THREE.HemisphereLight(0xffffff, 0x334455, 1.1);
   private ambient = new THREE.AmbientLight(0xffffff, 0.35);
@@ -290,6 +336,7 @@ export class World {
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const params = new URLSearchParams(window.location.search);
+    this.collisionEnabled = params.get("cameraCollision") !== "0";
     const mobile =
       window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
     const dpr = window.devicePixelRatio || 1;
@@ -346,6 +393,7 @@ export class World {
 
   applyWelcome(welcome: Welcome): void {
     this.clearParts();
+    this.setPlayer(welcome.player);
     this.lighting = welcome.lighting;
     this.applyLighting(welcome.lighting);
     this.applyCamera(welcome.camera);
@@ -356,6 +404,9 @@ export class World {
   }
 
   applySnapshot(snapshot: Snapshot): void {
+    // The exclusion must be current before this snapshot's new parts are
+    // filed into the camera collision grid.
+    this.setPlayer(snapshot.player);
     if (snapshot.lighting) {
       this.lighting = snapshot.lighting;
       this.applyLighting(snapshot.lighting);
@@ -370,6 +421,9 @@ export class World {
     for (const update of snapshot.updatedTransforms) {
       const atom = this.parts.get(update.id);
       if (!atom) continue;
+      // A moved box's cached cells would be stale; it can be indexed
+      // again once a full prop update arrives.
+      this.unindexCollision(update.id);
       const current = atom.moving ? this.trsAt(atom, now) : atom.to;
       // `size` only rides along when it changed; remember it, so the next
       // move of an unchanged part still scales to the server's size.
@@ -391,6 +445,164 @@ export class World {
     this.camera.quaternion.set(camera.rotation[0], camera.rotation[1], camera.rotation[2], camera.rotation[3]);
     this.camera.fov = camera.fov || 70;
     this.camera.updateProjectionMatrix();
+  }
+
+  /** Follow a new local character (or none), keeping its parts out of the
+   * camera collision grid. */
+  private setPlayer(player: PlayerInfo | null): void {
+    this.player = player;
+    this.localParts.clear();
+    if (!player) return;
+    if (player.root !== null) this.localParts.add(player.root);
+    if (player.head !== null) this.localParts.add(player.head);
+    for (const id of player.parts) this.localParts.add(id);
+    for (const id of this.localParts) this.unindexCollision(id);
+  }
+
+  /** Hide the local character, or restore it. Zero-scaling pool slots and
+   * toggling individual meshes keeps the batching path unchanged. */
+  setHiddenParts(ids: Iterable<number>): void {
+    const next = new Set(ids);
+    const previous = this.hidden;
+    this.hidden = next;
+    for (const id of previous) {
+      if (next.has(id)) continue;
+      const atom = this.parts.get(id);
+      if (atom) this.place(atom, atom.moving ? this.trsAt(atom, performance.now()) : atom.to);
+    }
+    for (const id of next) {
+      if (previous.has(id)) continue;
+      const atom = this.parts.get(id);
+      if (atom) this.place(atom, atom.to);
+    }
+    // The frame's step already flushed; hiding runs after it, so upload
+    // the zeroed slots before this frame draws.
+    for (const list of this.pools.values()) {
+      for (const pool of list) pool.flush();
+    }
+  }
+
+  /** A part's drawn pose this frame, interpolated like `step` draws it. */
+  partTransform(id: number, now: number): Trs | undefined {
+    const atom = this.parts.get(id);
+    if (!atom) return undefined;
+    return atom.moving ? this.trsAt(atom, now) : atom.to;
+  }
+
+  /** Distance from `from` to the nearest anchored geometry toward `to`, or
+   * null when the segment is clear. */
+  collisionRay(from: THREE.Vector3, to: THREE.Vector3): number | null {
+    if (!this.collisionEnabled) return null;
+    const direction = to.clone().sub(from);
+    const length = direction.length();
+    if (length < 1e-4) return null;
+    direction.divideScalar(length);
+    let best: number | null = null;
+    for (const box of this.collisionLarge.values()) {
+      const hit = rayBox(from, direction, length, box);
+      if (hit !== null && (best === null || hit < best)) best = hit;
+    }
+
+    const cell = COLLISION_CELL;
+    let cx = Math.floor(from.x / cell);
+    let cy = Math.floor(from.y / cell);
+    let cz = Math.floor(from.z / cell);
+    const stepX = direction.x > 0 ? 1 : direction.x < 0 ? -1 : 0;
+    const stepY = direction.y > 0 ? 1 : direction.y < 0 ? -1 : 0;
+    const stepZ = direction.z > 0 ? 1 : direction.z < 0 ? -1 : 0;
+    const deltaX = stepX === 0 ? Infinity : cell / Math.abs(direction.x);
+    const deltaY = stepY === 0 ? Infinity : cell / Math.abs(direction.y);
+    const deltaZ = stepZ === 0 ? Infinity : cell / Math.abs(direction.z);
+    const boundX = (x: number) => (stepX > 0 ? (x + 1) * cell : x * cell);
+    const boundY = (y: number) => (stepY > 0 ? (y + 1) * cell : y * cell);
+    const boundZ = (z: number) => (stepZ > 0 ? (z + 1) * cell : z * cell);
+    let maxX = stepX === 0 ? Infinity : (boundX(cx) - from.x) / direction.x;
+    let maxY = stepY === 0 ? Infinity : (boundY(cy) - from.y) / direction.y;
+    let maxZ = stepZ === 0 ? Infinity : (boundZ(cz) - from.z) / direction.z;
+    let travelled = 0;
+    for (let visited = 0; visited < 512; visited++) {
+      const ids = this.collisionCells.get(`${cx},${cy},${cz}`);
+      if (ids) {
+        for (const id of ids) {
+          const box = this.collisionBoxes.get(id);
+          if (!box) continue;
+          const hit = rayBox(from, direction, length, box);
+          if (hit !== null && (best === null || hit < best)) best = hit;
+        }
+      }
+      const next = Math.min(maxX, maxY, maxZ);
+      if (!(next <= length)) break;
+      travelled = next;
+      if (maxX <= maxY && maxX <= maxZ) {
+        cx += stepX;
+        maxX += deltaX;
+      } else if (maxY <= maxZ) {
+        cy += stepY;
+        maxY += deltaY;
+      } else {
+        cz += stepZ;
+        maxZ += deltaZ;
+      }
+      if (best !== null && best <= travelled) break;
+    }
+    return best;
+  }
+
+  private indexCollision(snap: PartSnapshot, trs: Trs): void {
+    if (!snap.anchored || snap.layer !== 0 || snap.transparency >= 0.9 || snap.onTop || snap.over) {
+      return;
+    }
+    if (Math.max(snap.size[0], snap.size[1], snap.size[2]) < 0.5) return;
+    if (this.localParts.has(snap.id)) return;
+    const box = boxOf(trs);
+    this.unindexCollision(snap.id);
+    const span = (low: number, high: number) => (high - low) / COLLISION_CELL;
+    if (
+      span(box.min.x, box.max.x) > COLLISION_MAX_CELLS ||
+      span(box.min.y, box.max.y) > COLLISION_MAX_CELLS ||
+      span(box.min.z, box.max.z) > COLLISION_MAX_CELLS
+    ) {
+      this.collisionLarge.set(snap.id, box);
+      return;
+    }
+    const cells: string[] = [];
+    const x0 = Math.floor(box.min.x / COLLISION_CELL);
+    const x1 = Math.floor(box.max.x / COLLISION_CELL);
+    const y0 = Math.floor(box.min.y / COLLISION_CELL);
+    const y1 = Math.floor(box.max.y / COLLISION_CELL);
+    const z0 = Math.floor(box.min.z / COLLISION_CELL);
+    const z1 = Math.floor(box.max.z / COLLISION_CELL);
+    for (let x = x0; x <= x1; x++) {
+      for (let y = y0; y <= y1; y++) {
+        for (let z = z0; z <= z1; z++) {
+          const key = `${x},${y},${z}`;
+          let ids = this.collisionCells.get(key);
+          if (!ids) {
+            ids = new Set();
+            this.collisionCells.set(key, ids);
+          }
+          ids.add(snap.id);
+          cells.push(key);
+        }
+      }
+    }
+    this.collisionBoxes.set(snap.id, box);
+    this.collisionCellsOf.set(snap.id, cells);
+  }
+
+  private unindexCollision(id: number): void {
+    const cells = this.collisionCellsOf.get(id);
+    if (cells) {
+      for (const key of cells) {
+        const ids = this.collisionCells.get(key);
+        if (!ids) continue;
+        ids.delete(id);
+        if (ids.size === 0) this.collisionCells.delete(key);
+      }
+      this.collisionCellsOf.delete(id);
+    }
+    this.collisionBoxes.delete(id);
+    this.collisionLarge.delete(id);
   }
 
   private applyLighting(lighting: Lighting): void {
@@ -453,6 +665,11 @@ export class World {
       for (const pool of pools) this.scene.remove(pool.mesh);
     }
     this.pools.clear();
+    this.collisionCells.clear();
+    this.collisionBoxes.clear();
+    this.collisionCellsOf.clear();
+    this.collisionLarge.clear();
+    this.hidden.clear();
   }
 
   private addPart(snap: PartSnapshot, now: number): void {
@@ -469,6 +686,7 @@ export class World {
     };
     this.parts.set(snap.id, atom);
     this.createVisual(atom);
+    this.indexCollision(snap, trs);
   }
 
   private updatePart(snap: PartSnapshot, now: number): void {
@@ -477,6 +695,7 @@ export class World {
       this.addPart(snap, now);
       return;
     }
+    this.unindexCollision(snap.id);
     const current = atom.moving ? this.trsAt(atom, now) : atom.to;
     this.removeVisual(atom);
     atom.snap = snap;
@@ -485,11 +704,13 @@ export class World {
     atom.changedAt = now;
     atom.moving = true;
     this.createVisual(atom);
+    this.indexCollision(snap, atom.to);
   }
 
   private removePart(id: number): void {
     const atom = this.parts.get(id);
     if (!atom) return;
+    this.unindexCollision(id);
     this.parts.delete(id);
     this.removeVisual(atom);
   }
@@ -585,10 +806,7 @@ export class World {
     const slot = pool.alloc();
     atom.pool = pool;
     atom.slot = slot;
-    pool.setMatrix(
-      slot,
-      new THREE.Matrix4().compose(atom.from.position, atom.from.quaternion, atom.from.scale),
-    );
+    this.place(atom, atom.from);
     pool.setColor(slot, tinted(snap.color, snap.maps.tint));
     pool.flush();
   }
@@ -738,12 +956,17 @@ export class World {
   }
 
   private place(atom: Atom, trs: Trs): void {
+    const hidden = this.hidden.has(atom.snap.id);
     if (atom.pool && atom.slot !== undefined) {
       atom.pool.setMatrix(
         atom.slot,
-        new THREE.Matrix4().compose(trs.position, trs.quaternion, trs.scale),
+        hidden
+          ? ZERO_MATRIX
+          : new THREE.Matrix4().compose(trs.position, trs.quaternion, trs.scale),
       );
     } else if (atom.object) {
+      atom.object.visible = !hidden;
+      if (hidden) return;
       if (atom.plane) {
         const offset = atom.plane.offset.clone().applyQuaternion(trs.quaternion);
         atom.object.position.copy(trs.position).add(offset);
@@ -757,10 +980,9 @@ export class World {
     }
   }
 
-  /** Give moving parts their transform for this frame, then light the sun
-   * around the camera and draw. Static parts already hold their final
-   * matrix, so they cost nothing per frame. */
-  update(now: number): void {
+  /** Give moving parts their transform for this frame. Static parts
+   * already hold their final matrix, so they cost nothing per frame. */
+  step(now: number): void {
     for (const atom of this.parts.values()) {
       if (!atom.moving) continue;
       let trs: Trs;
@@ -775,6 +997,10 @@ export class World {
     for (const list of this.pools.values()) {
       for (const pool of list) pool.flush();
     }
+  }
+
+  /** Light the sun and sky around this frame's camera, then draw. */
+  render(now: number): void {
     if (this.lighting) this.sunPosition(new THREE.Vector3(...this.lighting.sunDirection));
     this.sky.mesh.position.copy(this.camera.position);
     this.renderer.render(this.scene, this.camera);

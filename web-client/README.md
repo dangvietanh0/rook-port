@@ -16,5 +16,9 @@ Source layout:
 - `src/net.ts` — WebSocket connection and reconnection.
 - `src/mesh.ts` — the `RKMW` mesh blob reader, mesh cache and image textures.
 - `src/materials.ts` — Roblox material presets and the Three materials.
-- `src/world.ts` — the scene, part instancing, decals, lighting and sky.
-- `src/main.ts` — input injection, the free camera and the HUD.
+- `src/world.ts` — the scene, part instancing, decals, lighting, sky, the
+  camera collision grid, step/render split and local-character hiding.
+- `src/player-camera.ts` — the third/first-person orbit camera that follows
+  the local character.
+- `src/main.ts` — input injection, the free and player cameras, movement,
+  touch controls and the HUD.
