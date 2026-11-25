@@ -13,15 +13,18 @@ use std::time::{Duration, Instant};
 use glam::Vec3;
 use rook_client::{Game, Setup};
 use rook_content::Resolver;
+use rook_dom::{Dom, InstanceId};
 use rook_engine::{CameraView, InputEvent};
 use rook_render::DrawShape;
 use rook_scene::SceneCache;
+use rook_types::{Value, Vector3};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::broadcast;
 
 use crate::assets::{self, ImageStore, MeshStore};
 use crate::protocol::{
-    CameraSnapshot, GuiNode, PartSnapshot, ServerMessage, SessionStats, Snapshot, Welcome,
+    CameraSnapshot, GuiNode, PartSnapshot, PlayerInfo, ServerMessage, SessionStats, Snapshot,
+    Welcome,
 };
 use crate::snapshot;
 
@@ -43,6 +46,12 @@ pub(crate) enum Command {
     /// camera: terrain and content load around it.
     Camera {
         position: [f32; 3],
+    },
+    /// A world-space walk direction, at most 1 long. Refreshes the
+    /// watchdog every time it arrives.
+    Move {
+        x: f32,
+        z: f32,
     },
     /// A browser joined: flush the pending delta and hand back the whole
     /// scene as it is now. A welcome serialized at startup would be stale
@@ -84,6 +93,8 @@ struct NetIds {
     next: u64,
     by_key: FxHashMap<EntryKey, u64>,
     by_id: FxHashMap<u64, EntryKey>,
+    /// Every net id of an instance: layer 0 first, then its image layers.
+    by_instance: FxHashMap<u64, Vec<u64>>,
 }
 
 impl NetIds {
@@ -95,17 +106,38 @@ impl NetIds {
         let id = self.next;
         self.by_key.insert(key, id);
         self.by_id.insert(id, key);
+        if let EntryKey::Instance { id: instance, .. } = key {
+            self.by_instance.entry(instance).or_default().push(id);
+        }
         id
     }
 
     fn remove(&mut self, key: EntryKey) -> Option<u64> {
         let id = self.by_key.remove(&key)?;
         self.by_id.remove(&id);
+        if let EntryKey::Instance { id: instance, .. } = key
+            && let Some(ids) = self.by_instance.get_mut(&instance)
+        {
+            ids.retain(|other| *other != id);
+            if ids.is_empty() {
+                self.by_instance.remove(&instance);
+            }
+        }
         Some(id)
     }
 
     fn key(&self, id: u64) -> Option<EntryKey> {
         self.by_id.get(&id).copied()
+    }
+
+    fn ids_of(&self, instance: u64) -> &[u64] {
+        self.by_instance.get(&instance).map_or(&[], Vec::as_slice)
+    }
+
+    fn base_id(&self, instance: u64) -> Option<u64> {
+        self.by_instance
+            .get(&instance)
+            .and_then(|ids| ids.first().copied())
     }
 }
 
@@ -115,6 +147,7 @@ struct Entry {
     key: EntryKey,
     layer: u32,
     parent: Option<EntryKey>,
+    anchored: bool,
     part: rook_render::PartInstance,
 }
 
@@ -157,7 +190,7 @@ fn run(
         play,
         content: content.clone(),
         script: None,
-        client_script: None,
+        client_script: play.then(|| include_str!("player_controller.luau").to_owned()),
         wait_for_sounds: false,
         core_scripts: None,
         user_settings: None,
@@ -175,7 +208,7 @@ fn run(
     game.set_viewport(1280, 720);
     let saved_camera = game.saved_camera();
 
-    let mut session = Session::new(game, saved_camera, content, shared, frames);
+    let mut session = Session::new(game, play, saved_camera, content, shared, frames);
     if let Err(error) = session.prime() {
         let _ = ready.send(Err(error));
         return Ok(());
@@ -188,6 +221,7 @@ fn run(
 
 struct Session<'a> {
     game: Game,
+    play: bool,
     cache: SceneCache,
     saved_camera: rook_render::Camera,
     /// Where the browser's free camera is, for loading the nearest content
@@ -210,20 +244,26 @@ struct Session<'a> {
     image_seen: FxHashSet<[u8; 32]>,
     /// The GUI generation last sent, so an unchanged screen costs nothing.
     gui_generation: Option<u64>,
+    /// The walk direction last written to `RookMove`, and when the browser
+    /// last sent one. A quiet client stops walking.
+    move_vector: Vec3,
+    move_at: Option<Instant>,
 }
 
 impl<'a> Session<'a> {
     fn new(
         mut game: Game,
+        play: bool,
         saved_camera: rook_render::Camera,
         content: &Arc<Resolver>,
         shared: &'a Arc<Mutex<Shared>>,
         frames: &'a broadcast::Sender<Vec<u8>>,
     ) -> Self {
-        let focus = saved_camera.position;
+        let focus = player_position(game.view()).unwrap_or(saved_camera.position);
         let cache = SceneCache::for_data_model(game.view_mut(), content, focus);
         Self {
             game,
+            play,
             cache,
             saved_camera,
             client_camera: focus,
@@ -237,6 +277,8 @@ impl<'a> Session<'a> {
             mesh_seen: FxHashSet::default(),
             image_seen: FxHashSet::default(),
             gui_generation: None,
+            move_vector: Vec3::ZERO,
+            move_at: None,
         }
     }
 
@@ -270,6 +312,7 @@ impl<'a> Session<'a> {
                 }
             }
 
+            self.expire_move();
             let dt = (frame_start - last).as_secs_f64().min(0.1);
             last = frame_start;
             self.game.advance(dt);
@@ -299,6 +342,7 @@ impl<'a> Session<'a> {
             Command::Camera { position } => {
                 self.client_camera = Vec3::from_array(position);
             }
+            Command::Move { x, z } => self.set_move(x, z),
             Command::Welcome(reply) => {
                 // First bring every other browser up to date, so replacing
                 // the delta baseline below loses nothing.
@@ -311,9 +355,12 @@ impl<'a> Session<'a> {
     /// Bring the scene up to date with the step and the files that arrived
     /// since the last frame.
     fn step_scene(&mut self) {
-        let focus = self
-            .scripted_camera()
-            .map_or(self.client_camera, |v| v.cframe.position);
+        // The character is what the player watches; content loads around
+        // it even while a script owns the camera.
+        let focus = player_position(self.game.view()).unwrap_or_else(|| {
+            self.scripted_camera()
+                .map_or(self.client_camera, |v| v.cframe.position)
+        });
         let mut to_render = self.cache.update(self.game.view_mut(), focus);
         self.take_images(&mut to_render);
         for hash in to_render.take_dropped_meshes() {
@@ -387,6 +434,85 @@ impl<'a> Session<'a> {
         self.game.view().scripted_camera()
     }
 
+    /// The local character as the browser follows and hides it.
+    fn player_info(&self) -> Option<PlayerInfo> {
+        let world = self.game.view().runtime().world();
+        let dom = &world.dom;
+        let character = local_character(dom)?;
+        let root = dom.find_first_child(character, "HumanoidRootPart", true);
+        let head = dom.find_first_child(character, "Head", true);
+        let mut parts = Vec::new();
+        for id in std::iter::once(character).chain(dom.descendants(character)) {
+            parts.extend_from_slice(self.net_ids.ids_of(id.to_ref().0));
+        }
+        Some(PlayerInfo {
+            root: root.and_then(|id| self.net_ids.base_id(id.to_ref().0)),
+            head: head.and_then(|id| self.net_ids.base_id(id.to_ref().0)),
+            parts,
+        })
+    }
+
+    /// Whether the place brought its own character controller. The
+    /// injected controller returns early for these, so the browser must
+    /// stay a spectator.
+    fn has_own_controller(&self) -> bool {
+        let world = self.game.view().runtime().world();
+        let dom = &world.dom;
+        let Some(player) = dom.local_player() else {
+            return false;
+        };
+        let Some(scripts) = dom.find_first_child(player, "PlayerScripts", false) else {
+            return false;
+        };
+        ["PlayerModule", "ControlScript", "CameraScript"]
+            .iter()
+            .any(|name| dom.find_first_child(scripts, name, false).is_some())
+    }
+
+    /// Store the browser's walk direction on the local player. The
+    /// controller reads it on its next Heartbeat.
+    fn set_move(&mut self, x: f32, z: f32) {
+        let mut vector = Vec3::new(x, 0.0, z);
+        if !vector.is_finite() {
+            return;
+        }
+        if vector.length_squared() > 1.0 {
+            vector = vector.normalize();
+        }
+        self.move_at = Some(Instant::now());
+        if (vector - self.move_vector).length_squared() <= 1e-6 {
+            return;
+        }
+        self.move_vector = vector;
+        self.write_move(vector);
+    }
+
+    /// Stop a character whose browser went quiet: a closed tab, a
+    /// backgrounded phone, or a lost network must not leave it walking.
+    fn expire_move(&mut self) {
+        if self.move_vector == Vec3::ZERO {
+            return;
+        }
+        let Some(at) = self.move_at else {
+            return;
+        };
+        if at.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.move_vector = Vec3::ZERO;
+        self.move_at = None;
+        self.write_move(Vec3::ZERO);
+    }
+
+    fn write_move(&mut self, vector: Vec3) {
+        let mut world = self.game.view().runtime().world_mut();
+        let dom = &mut world.dom;
+        let Some(player) = dom.local_player() else {
+            return;
+        };
+        let _ = dom.set_attribute(player, "RookMove", Some(Value::Vector3(Vector3(vector))));
+    }
+
     /// The local player's ScreenGuis as HTML nodes, and the generation they
     /// are at.
     fn gui_tree(&self) -> (u64, Vec<GuiNode>) {
@@ -455,6 +581,9 @@ impl<'a> Session<'a> {
                 server_tick: self.tick,
                 simulated_seconds: self.game.view().now(),
             },
+            player: self.player_info(),
+            play: self.play,
+            controller: self.play && !self.has_own_controller(),
         }
     }
 
@@ -488,6 +617,8 @@ impl<'a> Session<'a> {
     /// to draw a part it has no geometry for.
     fn entries(&self) -> Vec<Entry> {
         let parts = &self.cache.scene.parts;
+        let world = self.game.view().runtime().world();
+        let dom = &world.dom;
         let mut owned = FxHashSet::default();
         let mut entries = Vec::new();
         for drawn in self.cache.drawn_entries() {
@@ -512,6 +643,8 @@ impl<'a> Session<'a> {
                 key,
                 layer: drawn.layer,
                 parent: (drawn.layer > 0).then_some(base),
+                anchored: drawn.layer == 0
+                    && dom.bool_property(drawn.id, "Anchored").unwrap_or(false),
                 part: *drawn.part,
             });
         }
@@ -530,6 +663,7 @@ impl<'a> Session<'a> {
                 key: EntryKey::Part(index),
                 layer: 0,
                 parent: None,
+                anchored: true,
                 part: *part,
             });
         }
@@ -539,7 +673,7 @@ impl<'a> Session<'a> {
     fn snapshot_of(&mut self, entry: Entry) -> PartSnapshot {
         let id = self.net_ids.id(entry.key);
         let parent = entry.parent.map(|parent| self.net_ids.id(parent));
-        snapshot::part_snapshot(id, parent, entry.layer, &entry.part)
+        snapshot::part_snapshot(id, parent, entry.layer, entry.anchored, &entry.part)
     }
 
     fn send_snapshot(&mut self) {
@@ -602,6 +736,7 @@ impl<'a> Session<'a> {
             lighting: Some(snapshot::lighting_snapshot(&self.cache.scene.lighting)),
             camera: Some(self.camera_snapshot()),
             gui,
+            player: self.player_info(),
             stats,
         };
         self.tick += 1;
@@ -614,6 +749,20 @@ impl<'a> Session<'a> {
     }
 }
 
+fn local_character(dom: &Dom) -> Option<InstanceId> {
+    let player = dom.local_player()?;
+    let character = dom.ref_property(player, "Character")?;
+    (!dom.is_destroyed(character)).then_some(character)
+}
+
+fn player_position(view: &rook_engine::DataModel) -> Option<Vec3> {
+    let world = view.runtime().world();
+    let dom = &world.dom;
+    let root = dom.find_first_child(local_character(dom)?, "HumanoidRootPart", true)?;
+    dom.cframe_property(root, "CFrame")
+        .map(|cframe| cframe.position)
+}
+
 /// Whether two looks differ only in where the part is, so the next
 /// snapshot can send three numbers and a quaternion instead of the whole
 /// part.
@@ -621,7 +770,8 @@ fn transform_only(
     old: &PartSnapshot,
     new: &PartSnapshot,
 ) -> Option<crate::protocol::TransformUpdate> {
-    let same = old.shape == new.shape
+    let same = old.anchored == new.anchored
+        && old.shape == new.shape
         && old.mesh == new.mesh
         && old.color == new.color
         && old.transparency == new.transparency

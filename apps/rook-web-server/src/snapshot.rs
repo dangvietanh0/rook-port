@@ -57,6 +57,7 @@ pub(crate) fn part_snapshot(
     id: u64,
     parent: Option<u64>,
     layer: u32,
+    anchored: bool,
     part: &PartInstance,
 ) -> PartSnapshot {
     let (shape, mesh) = shape_of(part.shape);
@@ -101,6 +102,7 @@ pub(crate) fn part_snapshot(
         id,
         parent,
         layer,
+        anchored,
         shape,
         mesh,
         position: vec3(part.position),

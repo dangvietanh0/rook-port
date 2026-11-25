@@ -294,6 +294,7 @@ fn handle(message: ClientMessage, state: &AppState) {
         ClientMessage::Focus { focused } => Command::Input(InputEvent::Focus { focused }),
         ClientMessage::Resize { width, height } => Command::Resize { width, height },
         ClientMessage::Camera { position } => Command::Camera { position },
+        ClientMessage::Move { x, z } => Command::Move { x, z },
         ClientMessage::Ping { .. } => return,
     };
     let _ = state.commands.send(command);

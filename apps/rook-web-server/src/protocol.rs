@@ -19,6 +19,9 @@ pub(crate) struct PartSnapshot {
     pub(crate) parent: Option<u64>,
     /// 0 for the part itself, 1.. for its image layers.
     pub(crate) layer: u32,
+    /// `BasePart.Anchored` for a part; terrain is anchored and an image
+    /// layer is not. The camera collision grid indexes anchored parts.
+    pub(crate) anchored: bool,
     pub(crate) shape: u8,
     pub(crate) mesh: Option<String>,
     pub(crate) position: [f32; 3],
@@ -141,6 +144,19 @@ pub(crate) struct CameraSnapshot {
     pub(crate) scripted: bool,
 }
 
+/// The local player's character as the browser needs it: what to follow
+/// and what to hide in first person.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlayerInfo {
+    /// Net id of the `HumanoidRootPart`.
+    pub(crate) root: Option<u64>,
+    /// Net id of the `Head`.
+    pub(crate) head: Option<u64>,
+    /// Net ids of every drawn character part, image layers included.
+    pub(crate) parts: Vec<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Welcome {
@@ -153,6 +169,13 @@ pub(crate) struct Welcome {
     pub(crate) camera: CameraSnapshot,
     pub(crate) gui: Vec<GuiNode>,
     pub(crate) stats: SessionStats,
+    pub(crate) player: Option<PlayerInfo>,
+    /// Whether this session has a local player at all (`--run` has none).
+    pub(crate) play: bool,
+    /// Whether the injected movement controller is running. A place with
+    /// its own `PlayerModule`, `ControlScript` or `CameraScript` keeps it,
+    /// and the browser stays a spectator.
+    pub(crate) controller: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -183,6 +206,8 @@ pub(crate) struct Snapshot {
     pub(crate) camera: Option<CameraSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) gui: Option<Vec<GuiNode>>,
+    /// The local character, or none while it is spawning or dead.
+    pub(crate) player: Option<PlayerInfo>,
     pub(crate) stats: SessionStats,
 }
 
@@ -306,6 +331,13 @@ pub(crate) enum ClientMessage {
     /// it as the player flies.
     Camera {
         position: [f32; 3],
+    },
+    /// A world-space horizontal walk direction, at most 1 long. The browser
+    /// sends it at 30 Hz while the player holds a direction and once as
+    /// zero when they stop.
+    Move {
+        x: f32,
+        z: f32,
     },
     Ping {
         t: f64,
