@@ -157,12 +157,22 @@ export interface SessionStats {
 export interface PlayerAvatar {
   name: string;
   userId: number;
+  /** The rig the 3D thumbnail was rendered with. */
+  rig?: string;
   /** Role (`Torso`, `Left Arm`, …) and the net id of that part. */
   body: [string, number][];
   shirt: string | null;
   pants: string | null;
+  /** Roblox's own 3D avatar mesh, when the server could fetch it. */
+  model?: AvatarModelInfo;
   /** The official R6 clips, present on the welcome and the panel's answer. */
   animations?: AnimationClip[];
+}
+
+/** Where the browser gets Roblox's OBJ, its MTL and the PNGs it names. */
+export interface AvatarModelInfo {
+  obj: string;
+  mtl: string;
 }
 
 export interface AnimationKey {
@@ -193,6 +203,8 @@ export interface PlayerInfo {
   head: number | null;
   /** Every drawn character part, image layers included. */
   parts: number[];
+  /** The root's linear velocity, for choosing walk, jump and fall. */
+  velocity?: [number, number, number];
   avatar?: PlayerAvatar;
 }
 

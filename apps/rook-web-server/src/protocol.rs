@@ -170,6 +170,9 @@ pub(crate) struct PlayerInfo {
     pub(crate) head: Option<u64>,
     /// Net ids of every drawn character part, image layers included.
     pub(crate) parts: Vec<u64>,
+    /// The root's linear velocity, so the browser picks walk, jump and
+    /// fall from the simulation rather than differentiating snapshots.
+    pub(crate) velocity: [f32; 3],
     /// The standard R6 look the player chose, when they chose one.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) avatar: Option<PlayerAvatar>,
@@ -182,14 +185,29 @@ pub(crate) struct PlayerInfo {
 pub(crate) struct PlayerAvatar {
     pub(crate) name: String,
     pub(crate) user_id: i64,
+    /// The rig the 3D thumbnail was rendered with: `R6` or `R15`. R6 models
+    /// use the standard joints; R15 models need joints read off the mesh.
+    #[serde(default)]
+    pub(crate) rig: String,
     /// Role (`Torso`, `Left Arm`, …) and the net id of that part.
     pub(crate) body: Vec<(String, u64)>,
     pub(crate) shirt: Option<String>,
     pub(crate) pants: Option<String>,
+    /// Roblox's 3D avatar mesh, when it could be fetched.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) model: Option<AvatarModelInfo>,
     /// The official R6 clips, sent with the welcome and the panel's
     /// answer, never with every snapshot.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) animations: Option<Vec<AnimationClip>>,
+}
+
+/// Where the browser gets the avatar's OBJ, MTL and textures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AvatarModelInfo {
+    pub(crate) obj: String,
+    pub(crate) mtl: String,
 }
 
 /// One R6 animation: its length and the poses at each keyframe.

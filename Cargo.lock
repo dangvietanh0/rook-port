@@ -4373,6 +4373,7 @@ dependencies = [
  "axum",
  "blake3",
  "clap",
+ "flate2",
  "futures-util",
  "glam 0.33.12",
  "image",

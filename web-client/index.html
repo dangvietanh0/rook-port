@@ -41,6 +41,11 @@
         <div class="row"><span>Ping</span><span id="ping">-</span></div>
         <div class="row"><span>Place</span><span id="place">-</span></div>
         <div class="row"><span>Parts</span><span id="parts">0</span></div>
+        <div class="row"><span>Resolution</span><span id="resolution-value">-</span></div>
+        <div id="resolution-row">
+          <input id="resolution" type="range" min="25" max="200" step="5" aria-label="Resolution" />
+          <button id="resolution-auto" type="button" title="Let the frame rate choose">Auto</button>
+        </div>
         <div id="status" class="warn">connecting</div>
       </div>
       <div id="avatar-panel" hidden>
@@ -58,7 +63,7 @@
           />
           <button id="avatar-submit" type="submit">Use</button>
         </form>
-        <div id="avatar-status">Wear the classic R6 avatar of any Roblox user.</div>
+        <div id="avatar-status">Wear any Roblox user's avatar.</div>
       </div>
       <div id="joystick" hidden>
         <div id="joystick-thumb"></div>

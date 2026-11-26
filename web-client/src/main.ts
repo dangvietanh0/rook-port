@@ -17,6 +17,9 @@ const statusLabel = document.getElementById("status") as HTMLDivElement;
 const statusDot = document.getElementById("status-dot") as HTMLSpanElement;
 const statsButton = document.getElementById("stats-button") as HTMLButtonElement;
 const statsPanel = document.getElementById("stats-panel") as HTMLDivElement;
+const resolution = document.getElementById("resolution") as HTMLInputElement;
+const resolutionValue = document.getElementById("resolution-value") as HTMLSpanElement;
+const resolutionAuto = document.getElementById("resolution-auto") as HTMLButtonElement;
 const avatarButton = document.getElementById("avatar-button") as HTMLButtonElement;
 const avatarPanel = document.getElementById("avatar-panel") as HTMLDivElement;
 const avatarForm = document.getElementById("avatar-form") as HTMLFormElement;
@@ -118,7 +121,7 @@ const net = new Net(
     } else if (status.state === "ready") {
       avatarSubmit.disabled = false;
       avatarStatus.textContent = status.name
-        ? `Wearing ${status.name}'s classic R6 avatar.`
+        ? `Wearing ${status.name}'s avatar.`
         : "Avatar ready.";
       if (status.animations?.length) world.setAvatarAnimations(status.animations);
     } else {
@@ -187,12 +190,20 @@ function setAvatarOpen(open: boolean): void {
   }
 }
 
+function updateResolution(): void {
+  const percent = world.renderScalePercent;
+  resolution.max = String(world.maxRenderScale);
+  resolution.value = String(percent);
+  resolutionValue.textContent = `${percent}%`;
+}
+
 function updateStats(): void {
   if (!statsOpen) return;
   fpsLabel.textContent = fps > 0 ? String(Math.round(fps)) : "-";
   pingLabel.textContent = pingMs === null ? "-" : `${pingMs} ms`;
   placeLabel.textContent = placeText;
   partsLabel.textContent = partsText;
+  updateResolution();
 }
 
 function dismissHint(): void {
@@ -649,6 +660,20 @@ for (const type of ["pointerup", "pointercancel", "lostpointercapture"] as const
 
 statsButton.addEventListener("click", () => setStatsOpen(!statsOpen));
 avatarButton.addEventListener("click", () => setAvatarOpen(!avatarOpen));
+
+resolution.max = String(world.maxRenderScale);
+resolution.addEventListener("input", () => {
+  world.setRenderScale(Number(resolution.value), false);
+  updateResolution();
+});
+resolution.addEventListener("change", () => {
+  world.setRenderScale(Number(resolution.value));
+  updateResolution();
+});
+resolutionAuto.addEventListener("click", () => {
+  world.setAutoResolution();
+  updateResolution();
+});
 
 avatarForm.addEventListener("submit", (event) => {
   event.preventDefault();

@@ -23,8 +23,8 @@ use tokio::sync::broadcast;
 
 use crate::assets::{self, ImageStore, MeshStore};
 use crate::protocol::{
-    AnimationClip, CameraSnapshot, GuiNode, PartSnapshot, PlayerAvatar, PlayerInfo, ServerMessage,
-    SessionStats, Snapshot, Welcome,
+    AnimationClip, AvatarModelInfo, CameraSnapshot, GuiNode, PartSnapshot, PlayerAvatar,
+    PlayerInfo, ServerMessage, SessionStats, Snapshot, Welcome,
 };
 use crate::snapshot;
 
@@ -66,9 +66,11 @@ pub(crate) enum Command {
         generation: u64,
         name: String,
         user_id: i64,
-        avatar: rook_lua::Avatar,
+        rig: String,
+        avatar: Box<rook_lua::Avatar>,
         shirt: Option<Arc<[u8]>>,
         pants: Option<Arc<[u8]>>,
+        model: Option<AvatarModelInfo>,
         animations: Arc<Vec<AnimationClip>>,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
@@ -90,8 +92,10 @@ const R6_ROLES: [&str; 6] = [
 struct AvatarState {
     name: String,
     user_id: i64,
+    rig: String,
     shirt: Option<[u8; 32]>,
     pants: Option<[u8; 32]>,
+    model: Option<AvatarModelInfo>,
     animations: Arc<Vec<AnimationClip>>,
 }
 
@@ -412,9 +416,11 @@ impl<'a> Session<'a> {
                 generation,
                 name,
                 user_id,
+                rig,
                 avatar,
                 shirt,
                 pants,
+                model,
                 animations,
                 reply,
             } => {
@@ -439,8 +445,10 @@ impl<'a> Session<'a> {
                 self.avatar = Some(AvatarState {
                     name: name.clone(),
                     user_id,
+                    rig,
                     shirt,
                     pants,
+                    model,
                     animations,
                 });
                 self.pending_avatar = Some(PendingAvatar {
@@ -448,7 +456,7 @@ impl<'a> Session<'a> {
                     old,
                     started: Instant::now(),
                 });
-                self.game.apply_avatar(&name, user_id, avatar);
+                self.game.apply_avatar(&name, user_id, *avatar);
             }
         }
     }
@@ -609,6 +617,10 @@ impl<'a> Session<'a> {
             PlayerAvatar {
                 name,
                 user_id,
+                rig: self
+                    .avatar
+                    .as_ref()
+                    .map_or_else(|| "R6".to_owned(), |a| a.rig.clone()),
                 body,
                 shirt: self
                     .avatar
@@ -620,13 +632,18 @@ impl<'a> Session<'a> {
                     .as_ref()
                     .and_then(|a| a.pants.as_ref())
                     .map(|hash| format!("/api/image/{}", assets::hex(hash))),
+                model: self.avatar.as_ref().and_then(|a| a.model.clone()),
                 animations,
             }
         });
+        let velocity = root
+            .and_then(|id| dom.vector3_property(id, "AssemblyLinearVelocity"))
+            .unwrap_or_default();
         Some(PlayerInfo {
             root: root.and_then(|id| self.net_ids.base_id(id.to_ref().0)),
             head: head.and_then(|id| self.net_ids.base_id(id.to_ref().0)),
             parts,
+            velocity: [velocity.x, velocity.y, velocity.z],
             avatar,
         })
     }

@@ -78,6 +78,8 @@ mimalloc = "0.1"
 # HTTPS (rook-platform's `native` network, for asset delivery): rustls
 # and gzip, no async runtime
 ureq = "3"
+# Asset delivery answers with gzip even when asked for identity.
+flate2 = "1"
 # The system clipboard (rook-platform's `native` clipboard, for TextBox
 # copy and paste): text only
 arboard = { version = "3", default-features = false }

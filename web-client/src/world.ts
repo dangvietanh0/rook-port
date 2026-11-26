@@ -16,6 +16,7 @@ import { PLACEMENT, SHAPE } from "./protocol";
 import { MeshCache, Textures } from "./mesh";
 import { decalMaterial, instancedMaterial, partMaterial, srgb, tinted } from "./materials";
 import { AvatarDresser, avatarGeometry } from "./avatar";
+import { loadAvatarModel, type AvatarModel } from "./avatar-model";
 import { R6_ROLES, R6Animator } from "./r6";
 
 const SNAPSHOT_MS = 50;
@@ -93,6 +94,8 @@ interface Atom {
   ownedMaterial?: THREE.Material;
   ownedMaterials?: THREE.Material[];
   meshRequested?: string;
+  /** The visual is Roblox's mesh, already in studs: don't scale it again. */
+  modelPart?: boolean;
   /** A decal plane's face turn and local offset, in the part's axes. */
   plane?: { turn: THREE.Quaternion; offset: THREE.Vector3 };
 }
@@ -341,10 +344,15 @@ export class World {
   private avatarParts = new Map<string, number>();
   private avatarRoles = new Map<number, string>();
   private avatarKey = "";
+  private model: AvatarModel | null = null;
+  private modelKey = "";
+  private modelRequest = 0;
   private animationKey = "";
   private readonly maxPixelRatio: number;
-  private readonly adaptive: boolean;
+  private readonly nativePixelRatio: number;
+  private adaptive: boolean;
   private pixelRatio: number;
+  private renderScale: number | null = null;
   private qualityFrames = 0;
   private qualitySince = performance.now();
 
@@ -353,26 +361,32 @@ export class World {
     this.collisionEnabled = params.get("cameraCollision") !== "0";
     const mobile =
       window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
-    const dpr = window.devicePixelRatio || 1;
+    this.nativePixelRatio = Math.max(1, window.devicePixelRatio || 1);
     const requested = Number(params.get("pixelRatio") ?? "");
     const forced = Number.isFinite(requested) && requested > 0;
-    this.adaptive = !forced;
-    this.maxPixelRatio = forced
-      ? requested
-      : mobile
-        ? Math.min(dpr, 1.5)
-        : Math.min(dpr, 2);
+    let saved: number | null = null;
+    try {
+      const stored = Number(localStorage.getItem("rook.renderScale") ?? "");
+      if (Number.isFinite(stored) && stored >= 25 && stored <= 200) saved = stored;
+    } catch {
+      // Storage can be unavailable; the slider still works for this visit.
+    }
+    this.renderScale = saved;
+    this.adaptive = !forced && saved === null;
+    this.maxPixelRatio = Math.max(this.nativePixelRatio, forced ? requested : 0);
     this.pixelRatio = forced
-      ? Math.min(requested, this.maxPixelRatio)
-      : mobile
-        ? Math.min(this.maxPixelRatio, 1.25)
-        : this.maxPixelRatio;
+      ? requested
+      : saved !== null
+        ? this.ratioForScale(saved)
+        : mobile
+          ? Math.min(this.nativePixelRatio, 2)
+          : this.nativePixelRatio;
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       // MSAA is expensive at phone pixel ratios, and the resolution scale
       // already provides some smoothing.
-      antialias: !mobile || dpr <= 1.5,
+      antialias: !mobile || this.nativePixelRatio <= 1.5,
       powerPreference: "high-performance",
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -487,15 +501,21 @@ export class World {
     this.setAvatar(player.avatar ?? null);
   }
 
-  /** Take a chosen look: its six body parts, its garment images and its
-   * animation clips. Only a change rebuilds anything. */
+  /** Take a chosen look: its six body parts, its garment images, Roblox's
+   * mesh and its animation clips. Only a change rebuilds anything. */
   private setAvatar(avatar: PlayerAvatar | null): void {
     const key = avatar
       ? `${avatar.userId}|${avatar.shirt ?? ""}|${avatar.pants ?? ""}|${avatar.body
           .map(([role, id]) => `${role}:${id}`)
           .join(",")}`
       : "";
-    if (key !== this.avatarKey) {
+    const modelKey = avatar?.model
+      ? `${avatar.userId}|${avatar.model.obj}|${avatar.model.mtl}`
+      : "";
+    const bodyChanged = key !== this.avatarKey;
+    const modelChanged = modelKey !== this.modelKey;
+
+    if (bodyChanged) {
       this.avatarKey = key;
       this.avatarParts.clear();
       this.avatarRoles.clear();
@@ -505,9 +525,38 @@ export class World {
           this.avatarRoles.set(id, role);
         }
       }
-      this.dresser.set(avatar?.shirt ?? null, avatar?.pants ?? null, () => this.redressAvatar());
-      this.redressAvatar();
     }
+
+    let previous: AvatarModel | null = null;
+    if (modelChanged) {
+      this.modelKey = modelKey;
+      this.modelRequest++;
+      previous = this.model;
+      this.model = null;
+      this.animator.setJoints();
+    }
+
+    if (bodyChanged) {
+      this.dresser.set(avatar?.shirt ?? null, avatar?.pants ?? null, () => this.redressAvatar());
+    }
+    if (bodyChanged || modelChanged) this.redressAvatar();
+
+    if (modelChanged) {
+      previous?.dispose();
+      if (avatar?.model) {
+        const request = this.modelRequest;
+        loadAvatarModel(avatar.model, avatar.rig).then((model) => {
+          if (request !== this.modelRequest) {
+            model?.dispose();
+            return;
+          }
+          this.model = model;
+          this.animator.setJoints(model?.joints);
+          this.redressAvatar();
+        });
+      }
+    }
+
     if (avatar?.animations?.length) {
       const animationKey = `${avatar.userId}|${avatar.animations.length}|${avatar.animations[0]?.keys.length ?? 0}`;
       if (animationKey !== this.animationKey) {
@@ -806,6 +855,7 @@ export class World {
     }
     atom.plane = undefined;
     atom.meshRequested = undefined;
+    atom.modelPart = false;
   }
 
   private canInstance(snap: PartSnapshot): boolean {
@@ -912,6 +962,18 @@ export class World {
     const snap = atom.snap;
     const role = this.avatarRoles.get(snap.id);
     if (!role) return;
+    const model = this.model?.roles.get(role);
+    if (model) {
+      const mesh = new THREE.Mesh(model.geometry, model.materials);
+      mesh.castShadow = snap.castShadow && snap.transparency < 0.999;
+      mesh.receiveShadow = snap.transparency < 0.999;
+      mesh.renderOrder = snap.onTop ? 1000 : 0;
+      atom.object = mesh;
+      atom.modelPart = true;
+      this.scene.add(mesh);
+      this.place(atom, atom.from);
+      return;
+    }
     const geometry =
       role === "Head" ? geometryForShape(snap.shape) : avatarGeometry(role);
     if (!geometry) return;
@@ -921,6 +983,7 @@ export class World {
     mesh.receiveShadow = snap.transparency < 0.999;
     mesh.renderOrder = snap.onTop ? 1000 : 0;
     atom.object = mesh;
+    atom.modelPart = false;
     atom.ownedMaterials = Array.isArray(materials) ? materials : [materials];
     this.scene.add(mesh);
     this.place(atom, atom.from);
@@ -1075,7 +1138,8 @@ export class World {
       } else {
         atom.object.position.copy(trs.position);
         atom.object.quaternion.copy(trs.quaternion);
-        atom.object.scale.copy(trs.scale);
+        if (atom.modelPart) atom.object.scale.set(1, 1, 1);
+        else atom.object.scale.copy(trs.scale);
       }
     }
   }
@@ -1186,7 +1250,7 @@ export class World {
     if (root == null || this.avatarParts.size === 0) return;
     const rootAtom = this.parts.get(root);
     if (!rootAtom) return;
-    const locals = this.animator.update(dt, rootAtom.to.position);
+    const locals = this.animator.update(dt, rootAtom.to.position, this.player?.velocity);
     if (!locals) return;
     const rootMatrix = new THREE.Matrix4().compose(
       rootAtom.to.position,
@@ -1199,7 +1263,10 @@ export class World {
       if (id === undefined) continue;
       const atom = this.parts.get(id);
       if (!atom?.object) continue;
-      const world = torso.clone().multiply(locals.get(role)!);
+      // The torso's own local already includes its pose; the limbs are
+      // relative to the torso, so only they get a second multiplication.
+      const world =
+        role === "Torso" ? torso.clone() : torso.clone().multiply(locals.get(role)!);
       atom.object.position.setFromMatrixPosition(world);
       atom.object.quaternion.setFromRotationMatrix(world);
     }
@@ -1213,6 +1280,52 @@ export class World {
     this.updateLights();
     this.renderer.render(this.scene, this.camera);
     this.adapt(now);
+  }
+
+  /** The drawing buffer's current scale, as a percentage of the device's
+   * own pixel ratio. */
+  get renderScalePercent(): number {
+    return Math.round((this.pixelRatio / this.nativePixelRatio) * 100);
+  }
+
+  /** The slider's top: at most four device pixels per CSS pixel. */
+  get maxRenderScale(): number {
+    return Math.min(200, Math.floor(((4 / this.nativePixelRatio) * 100) / 5) * 5);
+  }
+
+  /** Pick a resolution as a percentage of the device's pixel ratio. A
+   * manual choice stops adaptive scaling until "Auto" is pressed. */
+  setRenderScale(percent: number, persist = true): void {
+    if (!Number.isFinite(percent)) return;
+    const value = Math.min(this.maxRenderScale, Math.max(25, percent));
+    this.renderScale = value;
+    this.adaptive = false;
+    this.setPixelRatio(this.ratioForScale(value));
+    if (persist) {
+      try {
+        localStorage.setItem("rook.renderScale", String(value));
+      } catch {
+        // Storage can be unavailable; the setting lasts for this visit.
+      }
+    }
+  }
+
+  /** Return to the frame-rate-driven resolution. */
+  setAutoResolution(): void {
+    this.renderScale = null;
+    this.adaptive = true;
+    this.qualityFrames = 0;
+    this.qualitySince = performance.now();
+    this.setPixelRatio(Math.min(this.pixelRatio, this.maxPixelRatio));
+    try {
+      localStorage.removeItem("rook.renderScale");
+    } catch {
+      // Storage can be unavailable; nothing was stored.
+    }
+  }
+
+  private ratioForScale(percent: number): number {
+    return Math.min(4, Math.max(0.5, (this.nativePixelRatio * percent) / 100));
   }
 
   /** Trade resolution for frame rate, within the device's pixel ratio and
@@ -1230,7 +1343,7 @@ export class World {
     const fps = (this.qualityFrames * 1000) / elapsed;
     this.qualityFrames = 0;
     this.qualitySince = now;
-    const floor = 0.75;
+    const floor = 1;
     if (fps < 48 && this.pixelRatio > floor + 0.001) {
       this.setPixelRatio(Math.max(floor, this.pixelRatio - 0.15));
     } else if (fps > 57 && this.pixelRatio < this.maxPixelRatio - 0.001) {

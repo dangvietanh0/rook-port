@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types test/r6-animation.test.ts"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",

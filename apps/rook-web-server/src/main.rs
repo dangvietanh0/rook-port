@@ -39,7 +39,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::protocol::{AvatarStatus, ClientMessage, ServerMessage};
+use crate::protocol::{AvatarModelInfo, AvatarStatus, ClientMessage, ServerMessage};
 use crate::session::{Command, Shared};
 
 #[derive(Debug, Parser)]
@@ -74,6 +74,8 @@ struct AppState {
     /// The newest avatar request: an older lookup that finishes late must
     /// not replace a newer choice.
     avatar_generation: Arc<AtomicU64>,
+    /// The 3D avatar meshes already fetched, served to the browser.
+    models: Arc<avatar::ModelCache>,
 }
 
 #[tokio::main]
@@ -110,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         frames,
         commands,
         avatar_generation: Arc::new(AtomicU64::new(0)),
+        models: Arc::new(avatar::ModelCache::default()),
     };
 
     let index = web_root.join("index.html");
@@ -117,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/mesh/{hash}", get(mesh))
         .route("/api/image/{hash}", get(image))
+        .route("/api/avatar-model/{user_id}/{file}", get(avatar_model))
         .route("/api/animations", get(animations))
         .route("/api/health", get(health))
         .route("/ws", get(websocket))
@@ -184,6 +188,38 @@ async fn image(State(state): State<AppState>, Path(hash): Path<String>) -> Respo
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         png.to_vec(),
+    )
+        .into_response()
+}
+
+/// Roblox's own 3D avatar mesh: the OBJ, its MTL and the PNGs the MTL
+/// names. The browser binds the groups to the R6 joints.
+async fn avatar_model(
+    State(state): State<AppState>,
+    Path((user_id, file)): Path<(i64, String)>,
+) -> Response {
+    let model = {
+        let models = state.models.lock().expect("avatar models");
+        models.get(&user_id).cloned()
+    };
+    let Some(model) = model else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let (content_type, body) = if file == "obj" {
+        ("text/plain; charset=utf-8", model.obj.as_bytes().to_vec())
+    } else if file == "mtl" {
+        ("text/plain; charset=utf-8", model.mtl.as_bytes().to_vec())
+    } else if let Some((_, png)) = model.textures.iter().find(|(name, _)| name == &file) {
+        ("image/png", png.to_vec())
+    } else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        body,
     )
         .into_response()
 }
@@ -355,6 +391,7 @@ fn request_avatar(
 ) {
     let generation = state.avatar_generation.fetch_add(1, Ordering::Relaxed) + 1;
     let commands = state.commands.clone();
+    let models = Arc::clone(&state.models);
     tokio::task::spawn_blocking(move || {
         let mut avatar_status = AvatarStatus {
             state: "error".to_owned(),
@@ -363,16 +400,28 @@ fn request_avatar(
             message: None,
             animations: None,
         };
-        match avatar::resolve(&avatar_status.username) {
+        match avatar::resolve(&avatar_status.username, &models) {
             Ok(resolved) => {
+                let model = resolved.model.as_ref().map(|model| AvatarModelInfo {
+                    obj: format!(
+                        "/api/avatar-model/{}/obj?v={}",
+                        resolved.user_id, model.version
+                    ),
+                    mtl: format!(
+                        "/api/avatar-model/{}/mtl?v={}",
+                        resolved.user_id, model.version
+                    ),
+                });
                 let (reply, reply_rx) = std::sync::mpsc::channel();
                 let sent = commands.send(Command::Avatar {
                     generation,
                     name: resolved.name.clone(),
                     user_id: resolved.user_id,
-                    avatar: resolved.avatar,
+                    rig: resolved.rig.clone(),
+                    avatar: Box::new(resolved.avatar),
                     shirt: resolved.shirt,
                     pants: resolved.pants,
+                    model,
                     animations: Arc::clone(&resolved.animations),
                     reply,
                 });
