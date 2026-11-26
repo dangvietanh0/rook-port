@@ -191,6 +191,9 @@ body {
   font-size: 12px;
   line-height: 1.7;
   pointer-events: auto;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 #stats-panel .row {
@@ -210,14 +213,14 @@ body {
   white-space: nowrap;
 }
 
-#resolution-row {
+.slider-row {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 6px;
 }
 
-#resolution {
+.slider-row input[type="range"] {
   flex: 1;
   min-width: 0;
   height: 18px;
@@ -225,7 +228,12 @@ body {
   accent-color: var(--accent);
 }
 
-#resolution-auto {
+#assets-row {
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.mini {
   padding: 2px 8px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -236,9 +244,19 @@ body {
   cursor: pointer;
 }
 
-#resolution-auto:hover {
+.mini:hover {
   color: var(--text);
   border-color: var(--accent);
+}
+
+.mini:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#stats-panel .row .mini {
+  padding: 0 8px;
+  line-height: 1.5;
 }
 
 #status {

@@ -41,10 +41,23 @@
         <div class="row"><span>Ping</span><span id="ping">-</span></div>
         <div class="row"><span>Place</span><span id="place">-</span></div>
         <div class="row"><span>Parts</span><span id="parts">0</span></div>
+        <div class="row"><span>Draws</span><span id="draws">-</span></div>
+        <div class="row"><span>Tris</span><span id="tris">-</span></div>
+        <div class="row"><span>Lights</span><span id="lights">-</span></div>
         <div class="row"><span>Resolution</span><span id="resolution-value">-</span></div>
-        <div id="resolution-row">
+        <div id="resolution-row" class="slider-row">
           <input id="resolution" type="range" min="25" max="200" step="5" aria-label="Resolution" />
-          <button id="resolution-auto" type="button" title="Let the frame rate choose">Auto</button>
+          <button id="resolution-auto" class="mini" type="button" title="Let the frame rate choose">Auto</button>
+        </div>
+        <div class="row"><span>Brightness</span><span id="brightness-value">100%</span></div>
+        <div id="brightness-row" class="slider-row">
+          <input id="brightness" type="range" min="40" max="250" step="5" aria-label="Brightness" />
+          <button id="brightness-reset" class="mini" type="button" title="Reset to the place's exposure">Reset</button>
+        </div>
+        <div class="row"><span>Shadows</span><button id="shadows-toggle" class="mini" type="button" aria-pressed="true">On</button></div>
+        <div class="row"><span>Assets</span><span id="assets">-</span></div>
+        <div id="assets-row" class="slider-row">
+          <button id="assets-fetch" class="mini" type="button" title="Fetch every mesh and image in the place">Fetch</button>
         </div>
         <div id="status" class="warn">connecting</div>
       </div>

@@ -126,8 +126,9 @@ colour.
 - The browser creates `THREE.PointLight` and `THREE.SpotLight` objects with
   `distance = 0.8 * range + 5.5` and `decay = 1` (linear falloff, matching
   the measured Roblox curve), and intensity scaled from `Brightness`.
-- Cap active local lights by distance to the camera (nearest 24) so mobile
-  GPU shader cost stays bounded.
+- Fill a fixed rig of six point and two spot slots from the lights whose
+  own range reaches the camera, so mobile GPU shader cost stays bounded and
+  the light count never changes.
 - No ambient/emissive workaround: rooms become light because their lights
   arrive.
 

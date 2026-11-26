@@ -249,9 +249,12 @@ controls clear of it.
 - **Top-left bar:** a translucent dark pill holding the Rook mark, a stats
   button, and a fullscreen button (when supported). Height 52 px on touch,
   44 px on desktop. Buttons are 44×44 px with pressed feedback.
-- **Stats panel:** opens below the bar. Rows for FPS, ping, place, parts, and
-  connection status. Closes on outside press or Escape. The stats button
-  carries a small connection dot and `aria-expanded`.
+- **Stats panel:** opens below the bar. Rows for FPS, ping, place, parts,
+  draw calls, triangles, light slots, resolution, brightness, shadows, asset
+  prefetch progress, and connection status. Resolution and brightness have
+  sliders with reset buttons; shadows and asset prefetch have toggles.
+  Closes on outside press or Escape. The stats button carries a small
+  connection dot and `aria-expanded`.
 - **Joystick:** bottom left, a 132 px translucent ring with a 56 px thumb,
   fixed but with a generous hit area. Analog; dead zone 0.12; resets on
   release. Hidden on fine-pointer devices unless `?touch=1`.
@@ -285,6 +288,15 @@ is 150–220 ms and respects `prefers-reduced-motion`.
   session stops a character whose client went quiet.
 - The stats DOM is written at most twice a second, and only while the
   panel is open; the panel is hidden when closed.
+- The forward renderer uses fixed light slots (six point, two spot) filled
+  from lights inside their own range, so shader programs never recompile as
+  the nearest set changes. The sun's shadow map is redrawn only when a part
+  moves or the camera travels far enough, throttled to 15 Hz on touch
+  devices and 30 Hz elsewhere.
+- Static instanced pools compute a bounding sphere over their live slots
+  and stay frustum-culled; pools with snapshot-driven instances remain
+  unculled. Interpolation follows the measured snapshot interval (30–60 ms)
+  instead of a fixed window.
 - The collision grid is built incrementally and only queried for a short
   ray; no per-frame scene scan.
 

@@ -20,6 +20,15 @@ const statsPanel = document.getElementById("stats-panel") as HTMLDivElement;
 const resolution = document.getElementById("resolution") as HTMLInputElement;
 const resolutionValue = document.getElementById("resolution-value") as HTMLSpanElement;
 const resolutionAuto = document.getElementById("resolution-auto") as HTMLButtonElement;
+const brightness = document.getElementById("brightness") as HTMLInputElement;
+const brightnessValue = document.getElementById("brightness-value") as HTMLSpanElement;
+const brightnessReset = document.getElementById("brightness-reset") as HTMLButtonElement;
+const shadowsToggle = document.getElementById("shadows-toggle") as HTMLButtonElement;
+const drawsLabel = document.getElementById("draws") as HTMLSpanElement;
+const trisLabel = document.getElementById("tris") as HTMLSpanElement;
+const lightsLabel = document.getElementById("lights") as HTMLSpanElement;
+const assetsLabel = document.getElementById("assets") as HTMLSpanElement;
+const assetsFetch = document.getElementById("assets-fetch") as HTMLButtonElement;
 const avatarButton = document.getElementById("avatar-button") as HTMLButtonElement;
 const avatarPanel = document.getElementById("avatar-panel") as HTMLDivElement;
 const avatarForm = document.getElementById("avatar-form") as HTMLFormElement;
@@ -85,6 +94,10 @@ const net = new Net(
     placeText = welcome.place;
     partsText = welcome.stats.parts.toLocaleString();
     updateStats();
+    updateResolution();
+    updateBrightness();
+    updateShadows();
+    updateAssets();
     showTouchControls(playMode && touchCapable);
     updateHint();
     loading.classList.add("hidden");
@@ -197,13 +210,48 @@ function updateResolution(): void {
   resolutionValue.textContent = `${percent}%`;
 }
 
+function updateBrightness(): void {
+  const percent = world.brightnessPercent;
+  brightness.value = String(percent);
+  brightnessValue.textContent = `${percent}%`;
+}
+
+function updateShadows(): void {
+  const on = world.shadows;
+  shadowsToggle.textContent = on ? "On" : "Off";
+  shadowsToggle.setAttribute("aria-pressed", String(on));
+  shadowsToggle.title = on ? "Turn the sun's shadows off" : "Turn the sun's shadows on";
+}
+
+function updateAssets(): void {
+  const progress = world.assetsProgress;
+  if (progress.total === 0) {
+    assetsLabel.textContent = "-";
+    assetsFetch.disabled = true;
+    assetsFetch.textContent = "Fetch";
+    return;
+  }
+  assetsLabel.textContent = `${progress.done}/${progress.total}`;
+  assetsFetch.disabled = progress.active;
+  assetsFetch.textContent = progress.active ? "Fetching…" : "Fetch";
+}
+
 function updateStats(): void {
   if (!statsOpen) return;
   fpsLabel.textContent = fps > 0 ? String(Math.round(fps)) : "-";
   pingLabel.textContent = pingMs === null ? "-" : `${pingMs} ms`;
   placeLabel.textContent = placeText;
   partsLabel.textContent = partsText;
+  drawsLabel.textContent = String(world.drawCalls);
+  trisLabel.textContent =
+    world.drawTriangles >= 10000
+      ? `${Math.round(world.drawTriangles / 1000)}k`
+      : String(world.drawTriangles);
+  lightsLabel.textContent = String(world.lightCount);
   updateResolution();
+  updateBrightness();
+  updateShadows();
+  updateAssets();
 }
 
 function dismissHint(): void {
@@ -675,6 +723,29 @@ resolutionAuto.addEventListener("click", () => {
   updateResolution();
 });
 
+brightness.addEventListener("input", () => {
+  world.setBrightness(Number(brightness.value), false);
+  updateBrightness();
+});
+brightness.addEventListener("change", () => {
+  world.setBrightness(Number(brightness.value));
+  updateBrightness();
+});
+brightnessReset.addEventListener("click", () => {
+  world.setBrightness(100);
+  updateBrightness();
+});
+
+shadowsToggle.addEventListener("click", () => {
+  world.setShadows(!world.shadows);
+  updateShadows();
+});
+
+assetsFetch.addEventListener("click", () => {
+  world.preloadAssets();
+  updateAssets();
+});
+
 avatarForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const username = avatarUsername.value.trim();
@@ -765,6 +836,10 @@ void fetch("/api/animations")
     }
   })
   .catch(() => {});
+updateResolution();
+updateBrightness();
+updateShadows();
+updateAssets();
 requestAnimationFrame(frame);
 
 window.setInterval(() => {

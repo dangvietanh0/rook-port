@@ -19,11 +19,28 @@ import { AvatarDresser, avatarGeometry } from "./avatar";
 import { loadAvatarModel, type AvatarModel } from "./avatar-model";
 import { R6_ROLES, R6Animator } from "./r6";
 
-const SNAPSHOT_MS = 50;
+/** The server sends about every 30 ms. Interpolating over a fixed 50 ms
+ * left every moving part a frame and a half behind the newest snapshot;
+ * this window follows the measured interval instead. */
+let snapshotWindow = 36;
 /** Camera collision cell size in studs, and the span past which a box is
  * checked on every ray instead of being filed into cells. */
 const COLLISION_CELL = 8;
 const COLLISION_MAX_CELLS = 8;
+/** Point and spot lights the forward renderer evaluates per fragment.
+ * Roblox places carry many lights, but only the ones inside their own
+ * range contribute; keeping a fixed set of slots also stops Three from
+ * recompiling every material whenever the nearest set changes. */
+const POINT_LIGHTS = 6;
+const SPOT_LIGHTS = 2;
+const LIGHT_RECHECK = 500;
+/** Shadow maps only need redrawing when something moved. 30 Hz on a
+ * desktop and 15 Hz on a phone is invisible for a static sun. */
+const SHADOW_INTERVAL_DESKTOP = 33;
+const SHADOW_INTERVAL_MOBILE = 66;
+/** Recentre the shadow camera only after this much travel; the 280-stud
+ * orthographic box already covers the player. */
+const SHADOW_RECENTRE = 24;
 const UNIT_BOX = new THREE.Box3(
   new THREE.Vector3(-0.5, -0.5, -0.5),
   new THREE.Vector3(0.5, 0.5, 0.5),
@@ -80,6 +97,39 @@ function copyTrs(trs: Trs): Trs {
   };
 }
 
+/** Sub-stud details are invisible in a 1024px shadow map but still cost
+ * a draw; everything larger keeps the shadow it had before. */
+function castsShadow(snap: PartSnapshot): boolean {
+  if (!snap.castShadow) return false;
+  return Math.max(snap.size[0], snap.size[1], snap.size[2]) >= 0.4;
+}
+
+/** Every field `World.applyLighting` reads. The server repeats the full
+ * lighting block in each snapshot; comparing this key skips rebuilding
+ * the fog, sky and shadow state when the place's lighting is unchanged. */
+function lightingKeyOf(lighting: Lighting): string {
+  return [
+    lighting.sunDirection.join(","),
+    lighting.ambient.join(","),
+    lighting.outdoorAmbient.join(","),
+    lighting.sunColor.join(","),
+    lighting.fogColor.join(","),
+    lighting.fogStart,
+    lighting.fogEnd,
+    lighting.skyTop.join(","),
+    lighting.skyHorizon.join(","),
+    lighting.skyBottom.join(","),
+    lighting.skyTint.join(","),
+    lighting.skybox?.join(",") ?? "",
+    lighting.globalShadows ? 1 : 0,
+    lighting.prioritizeQuality ? 1 : 0,
+    lighting.environmentSpecular,
+    lighting.environmentDiffuse,
+    lighting.exposure,
+    lighting.tonemapper,
+  ].join("|");
+}
+
 interface Atom {
   snap: PartSnapshot;
   from: Trs;
@@ -102,6 +152,11 @@ interface Atom {
 
 class Pool {
   readonly mesh: THREE.InstancedMesh;
+  /** True once an instance in this pool has been moved by a snapshot.
+   * Such a pool cannot keep a fixed bounding sphere, so it stays
+   * unculled rather than growing stale bounds. */
+  moving = false;
+  boundsDirty = true;
   private free: number[] = [];
   private used = 0;
   private readonly capacity: number;
@@ -119,10 +174,55 @@ class Pool {
     this.mesh.count = 0;
     this.mesh.castShadow = castShadow;
     this.mesh.receiveShadow = true;
+    // The sphere is computed once the welcome has filled the pool; until
+    // then there is nothing safe to cull against.
     this.mesh.frustumCulled = false;
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     const zero = new THREE.Matrix4().makeScale(0, 0, 0);
     for (let i = 0; i < capacity; i++) this.mesh.setMatrixAt(i, zero);
+  }
+
+  /** Bound the instances actually in use. Free slots hold a zero matrix
+   * at the origin, which would otherwise drag every pool's sphere there
+   * and defeat frustum culling. */
+  computeBounds(): void {
+    this.boundsDirty = false;
+    const geometry = this.mesh.geometry;
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+    const base = geometry.boundingSphere;
+    if (!base) return;
+    const sphere = new THREE.Sphere();
+    const matrix = new THREE.Matrix4();
+    const part = new THREE.Sphere();
+    let any = false;
+    for (let i = 0; i < this.used; i++) {
+      this.mesh.getMatrixAt(i, matrix);
+      // A free slot holds an all-zero matrix. Checking only the diagonal
+      // would also skip a valid 120-degree rotation, whose diagonal is
+      // zero too.
+      if (matrix.elements.every((value) => value === 0)) continue;
+      part.copy(base).applyMatrix4(matrix);
+      if (any) sphere.union(part);
+      else {
+        sphere.copy(part);
+        any = true;
+      }
+    }
+    if (!any) sphere.set(new THREE.Vector3(), 0);
+    this.mesh.boundingSphere = sphere;
+    this.mesh.frustumCulled = true;
+  }
+
+  /** Release the per-pool GPU buffers and material when a place is
+   * replaced. Geometries belong to the shared caches and stay. */
+  dispose(): void {
+    this.mesh.dispose();
+    const material = this.mesh.material;
+    if (Array.isArray(material)) {
+      for (const entry of material) entry.dispose();
+    } else {
+      material.dispose();
+    }
   }
 
   get full(): boolean {
@@ -137,6 +237,7 @@ class Pool {
       slot = this.used++;
       this.mesh.count = this.used;
     }
+    this.boundsDirty = true;
     return slot;
   }
 
@@ -144,12 +245,14 @@ class Pool {
     const zero = new THREE.Matrix4().makeScale(0, 0, 0);
     this.mesh.setMatrixAt(slot, zero);
     this.matrixDirty = true;
+    this.boundsDirty = true;
     this.free.push(slot);
   }
 
   setMatrix(slot: number, matrix: THREE.Matrix4): void {
     this.mesh.setMatrixAt(slot, matrix);
     this.matrixDirty = true;
+    this.boundsDirty = true;
   }
 
   setColor(slot: number, color: THREE.Color): void {
@@ -337,8 +440,41 @@ export class World {
   private sky = new Sky();
   private skyboxKey = "";
   private lighting?: Lighting;
+  private lightingKey = "";
   private lights: LightSnapshot[] = [];
-  private lightObjects = new Map<number, THREE.Light>();
+  private readonly pointLights: THREE.PointLight[] = [];
+  private readonly spotLights: THREE.SpotLight[] = [];
+  private lightsDirty = true;
+  private lastLightCheck = 0;
+  private readonly lightEye = new THREE.Vector3(Infinity, Infinity, Infinity);
+  private readonly movingAtoms = new Set<Atom>();
+  private lastSnapshotAt = 0;
+  private snapshotGap = 0;
+  private readonly mobile: boolean;
+  private shadowsEnabled = true;
+  private shadowDirty = true;
+  private lastShadowUpdate = 0;
+  private readonly shadowEye = new THREE.Vector3(Infinity, Infinity, Infinity);
+  private readonly sunDirection = new THREE.Vector3(0, -1, 0);
+  private baseExposure = 1;
+  private brightness = 1;
+  private readonly scratchTrs: Trs = {
+    position: new THREE.Vector3(),
+    quaternion: new THREE.Quaternion(),
+    scale: new THREE.Vector3(),
+  };
+  private readonly scratchMatrix = new THREE.Matrix4();
+  private readonly scratchAvatar = new THREE.Matrix4();
+  private assetMeshes: string[] = [];
+  private assetImages: string[] = [];
+  private assetsTotal = 0;
+  private assetsDone = 0;
+  private assetsActive = 0;
+  private assetsQueue: string[] = [];
+  private assetRun = 0;
+  /** Draw calls and triangles from the last render, for the stats panel. */
+  drawCalls = 0;
+  drawTriangles = 0;
   private dresser = new AvatarDresser();
   private animator = new R6Animator();
   private avatarParts = new Map<string, number>();
@@ -359,7 +495,7 @@ export class World {
   constructor(private readonly canvas: HTMLCanvasElement) {
     const params = new URLSearchParams(window.location.search);
     this.collisionEnabled = params.get("cameraCollision") !== "0";
-    const mobile =
+    this.mobile =
       window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
     this.nativePixelRatio = Math.max(1, window.devicePixelRatio || 1);
     const requested = Number(params.get("pixelRatio") ?? "");
@@ -378,29 +514,51 @@ export class World {
       ? requested
       : saved !== null
         ? this.ratioForScale(saved)
-        : mobile
+        : this.mobile
           ? Math.min(this.nativePixelRatio, 2)
           : this.nativePixelRatio;
+    const shadowParam = params.get("shadows");
+    if (shadowParam === "0") this.shadowsEnabled = false;
+    try {
+      const stored = Number(localStorage.getItem("rook.brightness") ?? "");
+      if (Number.isFinite(stored) && stored >= 40 && stored <= 250) {
+        this.brightness = stored / 100;
+      }
+      // `?shadows=1` still forces shadows on for testing.
+      if (shadowParam !== "1" && localStorage.getItem("rook.shadows") === "0") {
+        this.shadowsEnabled = false;
+      }
+    } catch {
+      // Storage can be unavailable; the query parameter still applies.
+    }
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       // MSAA is expensive at phone pixel ratios, and the resolution scale
       // already provides some smoothing.
-      antialias: !mobile || this.nativePixelRatio <= 1.5,
+      antialias: !this.mobile || this.nativePixelRatio <= 1.5,
       powerPreference: "high-performance",
+      // The canvas is opaque and never uses stencil; dropping both saves
+      // bandwidth on tile-based phone GPUs.
+      alpha: false,
+      stencil: false,
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1;
-    this.renderer.shadowMap.enabled = params.get("shadows") !== "0";
-    this.renderer.shadowMap.type = mobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+    this.renderer.toneMappingExposure = this.brightness;
+    this.renderer.shadowMap.enabled = this.shadowsEnabled;
+    this.renderer.shadowMap.type = this.mobile ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+    // The sun is static and most parts are static; redraw the shadow map
+    // only when `updateShadow` says something actually changed.
+    this.renderer.shadowMap.autoUpdate = false;
     this.renderer.setPixelRatio(this.pixelRatio);
 
     this.scene.add(this.sky.mesh);
     this.scene.add(this.hemisphere, this.ambient, this.sun);
-    this.sun.castShadow = true;
+    this.sun.castShadow = this.shadowsEnabled;
+    this.makeLightRig();
     const shadow = this.sun.shadow;
-    shadow.mapSize.set(mobile ? 1024 : 2048, mobile ? 1024 : 2048);
+    shadow.mapSize.set(this.mobile ? 1024 : 2048, this.mobile ? 1024 : 2048);
     shadow.camera.left = -140;
     shadow.camera.right = 140;
     shadow.camera.top = 140;
@@ -427,6 +585,16 @@ export class World {
     this.applyLights(welcome.lights);
     this.applyCamera(welcome.camera);
     for (const part of welcome.parts) this.addPart(part, performance.now());
+    this.assetMeshes = welcome.meshes;
+    this.assetImages = welcome.images;
+    this.assetsTotal = this.assetMeshes.length + this.assetImages.length;
+    this.assetsDone = 0;
+    this.assetsActive = 0;
+    this.assetsQueue = [];
+    this.assetRun++;
+    this.lastSnapshotAt = 0;
+    this.snapshotGap = 0;
+    this.shadowDirty = true;
     // The welcome's transfer time shouldn't count against the frame rate.
     this.qualityFrames = 0;
     this.qualitySince = performance.now();
@@ -447,6 +615,17 @@ export class World {
     }
     for (const id of snapshot.destroyed) this.removePart(id);
     const now = performance.now();
+    if (this.lastSnapshotAt > 0) {
+      const gap = now - this.lastSnapshotAt;
+      // Ignore tab switches and stalls; otherwise follow the stream's own
+      // cadence so interpolation adds as little lag as it can.
+      if (gap > 5 && gap < 250) {
+        this.snapshotGap =
+          this.snapshotGap === 0 ? gap : this.snapshotGap * 0.85 + gap * 0.15;
+        snapshotWindow = Math.min(60, Math.max(30, this.snapshotGap * 1.15));
+      }
+    }
+    this.lastSnapshotAt = now;
     for (const part of snapshot.created) this.addPart(part, now);
     for (const update of snapshot.updatedTransforms) {
       const atom = this.parts.get(update.id);
@@ -469,10 +648,12 @@ export class World {
         // server already stepped before this snapshot was sent.
         atom.from = copyTrs(atom.to);
         atom.moving = false;
+        this.movingAtoms.delete(atom);
         this.place(atom, atom.to);
       } else {
         atom.from = current;
         atom.moving = true;
+        this.movingAtoms.add(atom);
       }
     }
     for (const part of snapshot.updatedProps) this.updatePart(part, now);
@@ -575,7 +756,9 @@ export class World {
       this.createVisual(atom);
       this.place(atom, atom.to);
       atom.moving = false;
+      this.movingAtoms.delete(atom);
     }
+    this.shadowDirty = true;
   }
 
   /** Hide the local character, or restore it. Zero-scaling pool slots and
@@ -584,6 +767,7 @@ export class World {
     const next = new Set(ids);
     const previous = this.hidden;
     this.hidden = next;
+    this.shadowDirty = true;
     for (const id of previous) {
       if (next.has(id)) continue;
       const atom = this.parts.get(id);
@@ -726,12 +910,15 @@ export class World {
   }
 
   private applyLighting(lighting: Lighting): void {
+    const key = lightingKeyOf(lighting);
+    if (key === this.lightingKey) return;
+    this.lightingKey = key;
     this.sun.color.copy(srgb(lighting.sunColor));
     this.sun.intensity = 2.2 * (lighting.environmentDiffuse > 0 ? Math.max(0.6, lighting.environmentDiffuse + 0.4) : 1);
-    this.sun.castShadow = lighting.globalShadows;
+    this.sun.castShadow = this.shadowsEnabled && lighting.globalShadows;
     this.sun.visible = lighting.sunColor.some((v) => v > 0.01);
-    const sun = new THREE.Vector3(...lighting.sunDirection);
-    this.sunPosition(sun);
+    this.sunDirection.set(...lighting.sunDirection);
+    this.sunPosition(this.sunDirection);
 
     this.hemisphere.color.copy(srgb(lighting.skyHorizon));
     this.hemisphere.groundColor.copy(srgb(lighting.skyBottom));
@@ -743,9 +930,11 @@ export class World {
     ]));
     this.ambient.intensity = 0.5;
 
-    this.renderer.toneMappingExposure = Math.max(0.05, lighting.exposure);
+    this.baseExposure = Math.max(0.05, lighting.exposure);
+    this.renderer.toneMappingExposure = this.baseExposure * this.brightness;
     this.renderer.toneMapping =
       lighting.tonemapper === 1 ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+    this.shadowDirty = true;
 
     this.sky.update(lighting);
     this.scene.fog =
@@ -782,7 +971,10 @@ export class World {
   private clearParts(): void {
     for (const id of [...this.parts.keys()]) this.removePart(id);
     for (const pools of this.pools.values()) {
-      for (const pool of pools) this.scene.remove(pool.mesh);
+      for (const pool of pools) {
+        this.scene.remove(pool.mesh);
+        pool.dispose();
+      }
     }
     this.pools.clear();
     this.collisionCells.clear();
@@ -790,6 +982,7 @@ export class World {
     this.collisionCellsOf.clear();
     this.collisionLarge.clear();
     this.hidden.clear();
+    this.movingAtoms.clear();
   }
 
   private addPart(snap: PartSnapshot, now: number): void {
@@ -805,6 +998,7 @@ export class World {
       moving: false,
     };
     this.parts.set(snap.id, atom);
+    this.shadowDirty = true;
     this.createVisual(atom);
     this.indexCollision(snap, trs);
   }
@@ -823,6 +1017,9 @@ export class World {
     atom.to = trsOf(snap);
     atom.changedAt = now;
     atom.moving = !this.localParts.has(snap.id);
+    if (atom.moving) this.movingAtoms.add(atom);
+    else this.movingAtoms.delete(atom);
+    this.shadowDirty = true;
     this.createVisual(atom);
     this.indexCollision(snap, atom.to);
   }
@@ -832,6 +1029,8 @@ export class World {
     if (!atom) return;
     this.unindexCollision(id);
     this.parts.delete(id);
+    this.movingAtoms.delete(atom);
+    this.shadowDirty = true;
     this.removeVisual(atom);
   }
 
@@ -875,7 +1074,7 @@ export class World {
     return [
       geometry,
       snap.material,
-      snap.castShadow && opacity > 0 ? 1 : 0,
+      castsShadow(snap) ? 1 : 0,
       snap.doubleSided ? 1 : 0,
       snap.light,
       snap.onTop ? 1 : 0,
@@ -927,7 +1126,7 @@ export class World {
     let pool = list.find((candidate) => !candidate.full);
     if (!pool) {
       const material = instancedMaterial(snap, this.textures);
-      pool = new Pool(geometry, material, snap.castShadow);
+      pool = new Pool(geometry, material, castsShadow(snap));
       pool.mesh.renderOrder = snap.onTop ? 1000 : 0;
       list.push(pool);
       this.scene.add(pool.mesh);
@@ -946,7 +1145,7 @@ export class World {
     if (!geometry) return;
     const material = partMaterial(snap, this.textures);
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.castShadow = snap.castShadow && snap.transparency < 0.999;
+    mesh.castShadow = castsShadow(snap);
     mesh.receiveShadow = snap.transparency < 0.999;
     mesh.renderOrder = snap.onTop ? 1000 : 0;
     atom.object = mesh;
@@ -965,7 +1164,7 @@ export class World {
     const model = this.model?.roles.get(role);
     if (model) {
       const mesh = new THREE.Mesh(model.geometry, model.materials);
-      mesh.castShadow = snap.castShadow && snap.transparency < 0.999;
+      mesh.castShadow = castsShadow(snap);
       mesh.receiveShadow = snap.transparency < 0.999;
       mesh.renderOrder = snap.onTop ? 1000 : 0;
       atom.object = mesh;
@@ -979,7 +1178,7 @@ export class World {
     if (!geometry) return;
     const materials = this.dresser.materials(role, snap.color);
     const mesh = new THREE.Mesh(geometry, materials);
-    mesh.castShadow = snap.castShadow && snap.transparency < 0.999;
+    mesh.castShadow = castsShadow(snap);
     mesh.receiveShadow = snap.transparency < 0.999;
     mesh.renderOrder = snap.onTop ? 1000 : 0;
     atom.object = mesh;
@@ -1000,7 +1199,7 @@ export class World {
       if (atom.snap.vertexColors) {
         const material = partMaterial(atom.snap, this.textures);
         const mesh = new THREE.Mesh(geometry, material);
-        mesh.castShadow = atom.snap.castShadow && atom.snap.transparency < 0.999;
+        mesh.castShadow = castsShadow(atom.snap);
         mesh.receiveShadow = atom.snap.transparency < 0.999;
         mesh.renderOrder = atom.snap.onTop ? 1000 : 0;
         atom.object = mesh;
@@ -1109,23 +1308,34 @@ export class World {
     this.place(atom, atom.from);
   }
 
-  private trsAt(atom: Atom, now: number): Trs {
-    const t = Math.min(Math.max((now - atom.changedAt) / SNAPSHOT_MS, 0), 1);
-    return {
-      position: atom.from.position.clone().lerp(atom.to.position, t),
-      quaternion: atom.from.quaternion.clone().slerp(atom.to.quaternion, t),
-      scale: atom.from.scale.clone().lerp(atom.to.scale, t),
-    };
+  private trsAt(
+    atom: Atom,
+    now: number,
+    out: Trs = {
+      position: new THREE.Vector3(),
+      quaternion: new THREE.Quaternion(),
+      scale: new THREE.Vector3(),
+    },
+  ): Trs {
+    const t = Math.min(Math.max((now - atom.changedAt) / snapshotWindow, 0), 1);
+    out.position.copy(atom.from.position).lerp(atom.to.position, t);
+    out.quaternion.copy(atom.from.quaternion).slerp(atom.to.quaternion, t);
+    out.scale.copy(atom.from.scale).lerp(atom.to.scale, t);
+    return out;
   }
 
-  private place(atom: Atom, trs: Trs): void {
+  private place(atom: Atom, trs: Trs, moving = false): void {
     const hidden = this.hidden.has(atom.snap.id);
     if (atom.pool && atom.slot !== undefined) {
+      if (moving) {
+        atom.pool.moving = true;
+        atom.pool.mesh.frustumCulled = false;
+      }
       atom.pool.setMatrix(
         atom.slot,
         hidden
           ? ZERO_MATRIX
-          : new THREE.Matrix4().compose(trs.position, trs.quaternion, trs.scale),
+          : this.scratchMatrix.compose(trs.position, trs.quaternion, trs.scale),
       );
     } else if (atom.object) {
       atom.object.visible = !hidden;
@@ -1147,19 +1357,26 @@ export class World {
   /** Give moving parts their transform for this frame. Static parts
    * already hold their final matrix, so they cost nothing per frame. */
   step(now: number): void {
-    for (const atom of this.parts.values()) {
-      if (!atom.moving) continue;
+    for (const atom of this.movingAtoms) {
       let trs: Trs;
-      if (now - atom.changedAt >= SNAPSHOT_MS) {
+      if (now - atom.changedAt >= snapshotWindow) {
         trs = atom.to;
         atom.moving = false;
+        this.movingAtoms.delete(atom);
       } else {
-        trs = this.trsAt(atom, now);
+        trs = this.trsAt(atom, now, this.scratchTrs);
       }
-      this.place(atom, trs);
+      this.place(atom, trs, atom.moving);
+      this.shadowDirty = true;
     }
     for (const list of this.pools.values()) {
-      for (const pool of list) pool.flush();
+      for (const pool of list) {
+        // Static pools can be culled once their sphere is known. A pool
+        // with any snapshot-driven instance keeps its old bounds and is
+        // left unculled instead.
+        if (pool.boundsDirty && !pool.moving) pool.computeBounds();
+        pool.flush();
+      }
     }
   }
 
@@ -1171,76 +1388,90 @@ export class World {
     this.animator.setClips(clips);
   }
 
-  /** Replace the local lights. They change rarely, so rebuilding the
-   * Three lights here keeps the per-frame work to picking the nearest. */
+  /** Create the fixed light slots once. Every slot stays visible even when
+   * unused (intensity 0), so the shader's light counts never change. */
+  private makeLightRig(): void {
+    for (let i = 0; i < POINT_LIGHTS; i++) {
+      const light = new THREE.PointLight(0xffffff, 0, 8, 1);
+      light.castShadow = false;
+      this.pointLights.push(light);
+      this.scene.add(light);
+    }
+    for (let i = 0; i < SPOT_LIGHTS; i++) {
+      const light = new THREE.SpotLight(0xffffff, 0, 8, Math.PI / 4, 0.2, 1);
+      light.castShadow = false;
+      light.target = new THREE.Object3D();
+      this.spotLights.push(light);
+      this.scene.add(light);
+      this.scene.add(light.target);
+    }
+  }
+
+  /** The light list changes only when the place does. */
   private applyLights(lights: LightSnapshot[]): void {
-    for (const light of this.lightObjects.values()) {
-      light.removeFromParent();
-      if (light instanceof THREE.SpotLight) light.target.removeFromParent();
-      light.dispose();
-    }
-    this.lightObjects.clear();
     this.lights = lights;
+    this.lightsDirty = true;
   }
 
-  /** Keep at most 24 local lights alive around the camera: a room's lamp
-   * must reach the browser, but a place with hundreds must not stall it. */
-  private updateLights(): void {
-    if (this.lights.length === 0) {
-      for (const light of this.lightObjects.values()) light.visible = false;
-      return;
-    }
+  /** Fill the fixed slots with the local lights that can actually reach
+   * the camera. Distant lights are outside their own `range` and
+   * contribute nothing, so dropping them is invisible. */
+  private updateLights(now: number): void {
     const eye = this.camera.position;
-    const nearest = this.lights
-      .map((light, index) => {
-        const dx = light.position[0] - eye.x;
-        const dy = light.position[1] - eye.y;
-        const dz = light.position[2] - eye.z;
-        return [index, dx * dx + dy * dy + dz * dz] as const;
-      })
-      .sort((a, b) => a[1] - b[1])
-      .slice(0, 24)
-      .map(([index]) => index);
-    const keep = new Set(nearest);
-    for (const [index, light] of this.lightObjects) {
-      if (!keep.has(index)) light.visible = false;
-    }
-    for (const index of nearest) {
-      const snap = this.lights[index];
-      let light = this.lightObjects.get(index);
-      if (!light) {
-        light = this.makeLight(snap);
-        this.lightObjects.set(index, light);
-        this.scene.add(light);
-        if (light instanceof THREE.SpotLight) this.scene.add(light.target);
-      }
-      light.visible = snap.brightness > 0;
-      light.color.copy(srgb(snap.color));
-      light.intensity = Math.max(0, snap.brightness) * 4;
-      light.position.set(snap.position[0], snap.position[1], snap.position[2]);
-      if (light instanceof THREE.SpotLight) {
-        light.distance = Math.max(0.1, snap.range);
-        const angle = Math.max(0.02, Math.min(Math.PI / 2 - 0.01, (snap.angle * Math.PI) / 360));
-        light.angle = angle;
-        light.target.position.set(
-          snap.position[0] + snap.direction[0] * snap.range,
-          snap.position[1] + snap.direction[1] * snap.range,
-          snap.position[2] + snap.direction[2] * snap.range,
-        );
-        light.target.updateMatrixWorld();
-      } else if (light instanceof THREE.PointLight) {
-        light.distance = Math.max(0.1, snap.range);
-      }
-    }
-  }
+    const moved = this.lightEye.distanceToSquared(eye) > 16 * 16;
+    if (!this.lightsDirty && !moved && now - this.lastLightCheck < LIGHT_RECHECK) return;
+    this.lightsDirty = false;
+    this.lastLightCheck = now;
+    this.lightEye.copy(eye);
 
-  private makeLight(snap: LightSnapshot): THREE.Light {
-    if (snap.shape === 0) {
-      return new THREE.PointLight(0xffffff, 1, 8, 1);
+    const points: Array<{ snap: LightSnapshot; score: number }> = [];
+    const spots: Array<{ snap: LightSnapshot; score: number }> = [];
+    for (const light of this.lights) {
+      if (light.brightness <= 0.001) continue;
+      const dx = light.position[0] - eye.x;
+      const dy = light.position[1] - eye.y;
+      const dz = light.position[2] - eye.z;
+      const distance = dx * dx + dy * dy + dz * dz;
+      const range = Math.max(0.1, light.range);
+      if (distance > range * range) continue;
+      const score = light.brightness / (distance + 1);
+      (light.shape === 0 ? points : spots).push({ snap: light, score });
     }
-    const light = new THREE.SpotLight(0xffffff, 1, 8, Math.PI / 4, 0.2, 1);
-    light.target = new THREE.Object3D();
-    return light;
+    points.sort((a, b) => b.score - a.score);
+    spots.sort((a, b) => b.score - a.score);
+
+    for (let i = 0; i < this.pointLights.length; i++) {
+      const slot = this.pointLights[i];
+      const chosen = points[i]?.snap;
+      if (!chosen) {
+        slot.intensity = 0;
+        continue;
+      }
+      slot.position.set(...chosen.position);
+      slot.color.copy(srgb(chosen.color));
+      slot.intensity = Math.max(0, chosen.brightness) * 4;
+      slot.distance = Math.max(0.1, chosen.range);
+    }
+    for (let i = 0; i < this.spotLights.length; i++) {
+      const slot = this.spotLights[i];
+      const chosen = spots[i]?.snap;
+      if (!chosen) {
+        slot.intensity = 0;
+        continue;
+      }
+      slot.position.set(...chosen.position);
+      slot.color.copy(srgb(chosen.color));
+      slot.intensity = Math.max(0, chosen.brightness) * 4;
+      slot.distance = Math.max(0.1, chosen.range);
+      const angle = Math.max(0.02, Math.min(Math.PI / 2 - 0.01, (chosen.angle * Math.PI) / 360));
+      slot.angle = angle;
+      slot.target.position.set(
+        chosen.position[0] + chosen.direction[0] * chosen.range,
+        chosen.position[1] + chosen.direction[1] * chosen.range,
+        chosen.position[2] + chosen.direction[2] * chosen.range,
+      );
+      slot.target.updateMatrixWorld();
+    }
   }
 
   /** Put the six body parts where the current clip says they are. The
@@ -1252,34 +1483,143 @@ export class World {
     if (!rootAtom) return;
     const locals = this.animator.update(dt, rootAtom.to.position, this.player?.velocity);
     if (!locals) return;
-    const rootMatrix = new THREE.Matrix4().compose(
+    const torso = this.scratchMatrix.compose(
       rootAtom.to.position,
       rootAtom.to.quaternion,
       UNIT_SCALE,
     );
-    const torso = rootMatrix.multiply(locals.get("Torso")!);
+    torso.multiply(locals.get("Torso")!);
+    const world = this.scratchAvatar;
     for (const role of R6_ROLES) {
       const id = this.avatarParts.get(role);
       if (id === undefined) continue;
       const atom = this.parts.get(id);
       if (!atom?.object) continue;
+      const local = locals.get(role);
+      if (!local) continue;
       // The torso's own local already includes its pose; the limbs are
       // relative to the torso, so only they get a second multiplication.
-      const world =
-        role === "Torso" ? torso.clone() : torso.clone().multiply(locals.get(role)!);
+      if (role === "Torso") world.copy(torso);
+      else world.multiplyMatrices(torso, local);
       atom.object.position.setFromMatrixPosition(world);
       atom.object.quaternion.setFromRotationMatrix(world);
     }
+    // The avatar's limbs move even while its root is still, so its shadow
+    // has to be redrawn too (at the throttled shadow cadence).
+    this.shadowDirty = true;
+  }
+
+  /** Recentre and redraw the sun's shadow map only when it is stale. The
+   * orthographic box already covers the player, so small camera moves can
+   * reuse the previous map. */
+  private updateShadow(now: number): void {
+    if (!this.shadowsEnabled || !this.sun.castShadow) return;
+    const moved =
+      this.shadowEye.distanceToSquared(this.camera.position) >
+      SHADOW_RECENTRE * SHADOW_RECENTRE;
+    if (!this.shadowDirty && !moved) return;
+    const interval = this.mobile ? SHADOW_INTERVAL_MOBILE : SHADOW_INTERVAL_DESKTOP;
+    if (!moved && now - this.lastShadowUpdate < interval) return;
+    this.sunPosition(this.sunDirection);
+    this.renderer.shadowMap.needsUpdate = true;
+    this.lastShadowUpdate = now;
+    this.shadowEye.copy(this.camera.position);
+    this.shadowDirty = false;
   }
 
   /** Light the sun and sky around this frame's camera, then draw. */
   render(now: number, dt: number): void {
-    if (this.lighting) this.sunPosition(new THREE.Vector3(...this.lighting.sunDirection));
     this.sky.mesh.position.copy(this.camera.position);
     this.animateAvatar(dt);
-    this.updateLights();
+    this.updateLights(now);
+    this.updateShadow(now);
     this.renderer.render(this.scene, this.camera);
+    this.drawCalls = this.renderer.info.render.calls;
+    this.drawTriangles = this.renderer.info.render.triangles;
     this.adapt(now);
+  }
+
+  /** The user's exposure multiplier, as a percentage. */
+  get brightnessPercent(): number {
+    return Math.round(this.brightness * 100);
+  }
+
+  /** Local-light slots the forward shader evaluates. */
+  get lightCount(): number {
+    return this.pointLights.length + this.spotLights.length;
+  }
+
+  setBrightness(percent: number, persist = true): void {
+    if (!Number.isFinite(percent)) return;
+    const value = Math.min(250, Math.max(40, percent));
+    this.brightness = value / 100;
+    this.renderer.toneMappingExposure = this.baseExposure * this.brightness;
+    if (persist) {
+      try {
+        localStorage.setItem("rook.brightness", String(value));
+      } catch {
+        // Storage can be unavailable; the setting lasts for this visit.
+      }
+    }
+  }
+
+  get shadows(): boolean {
+    return this.shadowsEnabled;
+  }
+
+  setShadows(enabled: boolean, persist = true): void {
+    this.shadowsEnabled = enabled;
+    this.renderer.shadowMap.enabled = enabled;
+    this.sun.castShadow = enabled && (this.lighting?.globalShadows ?? false);
+    this.shadowDirty = true;
+    if (persist) {
+      try {
+        localStorage.setItem("rook.shadows", enabled ? "1" : "0");
+      } catch {
+        // Storage can be unavailable; the setting lasts for this visit.
+      }
+    }
+  }
+
+  /** Fetch every mesh and image the welcome announced, a few at a time.
+   * The server serves hashed assets as immutable, so this also warms the
+   * browser's HTTP cache for the lazy loaders. */
+  get assetsProgress(): { done: number; total: number; active: boolean } {
+    return {
+      done: this.assetsDone,
+      total: this.assetsTotal,
+      active: this.assetsActive > 0 || this.assetsQueue.length > 0,
+    };
+  }
+
+  preloadAssets(): void {
+    if (this.assetsTotal === 0) return;
+    if (this.assetsActive > 0 || this.assetsQueue.length > 0) return;
+    this.assetsDone = 0;
+    this.assetsQueue = [
+      ...this.assetMeshes.map((hash) => `/api/mesh/${hash}`),
+      ...this.assetImages.map((hash) => `/api/image/${hash}`),
+    ];
+    const concurrency = this.mobile ? 3 : 4;
+    const run = ++this.assetRun;
+    const pump = () => {
+      while (this.assetsActive < concurrency && this.assetsQueue.length > 0) {
+        const url = this.assetsQueue.shift()!;
+        this.assetsActive++;
+        fetch(url, { cache: "force-cache" })
+          .then((response) => response.arrayBuffer())
+          .catch(() => {})
+          .finally(() => {
+            // A reconnect can replace the whole place mid-fetch; the old
+            // run must not report into the new one's counters.
+            if (run !== this.assetRun) return;
+            this.assetsActive--;
+            this.assetsDone++;
+            pump();
+          });
+      }
+    };
+    pump();
   }
 
   /** The drawing buffer's current scale, as a percentage of the device's
