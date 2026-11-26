@@ -120,3 +120,8 @@
   - [Replication](behavior/replication.md): what a client receives from the server
   - [User settings](behavior/user-settings.md): the player's settings, where they are saved and what Rook follows
 - **[The web port](web-port.md)**: the headless server and Three.js browser client
+- **Porting plans and specs**
+  - [Web player client plan](superpowers/plans/web-player-client.md): movement, camera and touch UI
+  - [R6 avatars, animations and lights plan](superpowers/plans/web-r6-avatars-animations-lights-latency.md): real avatar meshes, official clips and local lights
+  - [Web player client design](superpowers/specs/web-player-client.md): character, camera and mobile touch UI
+  - [Avatars, animations and lights design](superpowers/specs/web-port-r6-avatars-animations-lights-latency.md): Roblox-standard looks and lower latency

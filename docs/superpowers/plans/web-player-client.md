@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (Axum, MessagePack), Luau, TypeScript, Three.js, HTML/CSS.
 
-**Spec:** `docs/superpowers/specs/2026-11-24-web-player-client-design.md`
+**Spec:** `docs/superpowers/specs/web-player-client.md`
 
 ## Global Constraints
 

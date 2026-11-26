@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (axum, tokio, rook-engine, rook-lua, rook-formats, rook-scene), TypeScript + Three.js, MessagePack wire format.
 
-**Spec:** `docs/superpowers/specs/2026-11-25-web-avatar-animation-lighting-design.md`
+**Spec:** `docs/superpowers/specs/web-port-r6-avatars-animations-lights-latency.md`
 
 ## Global Constraints
 
