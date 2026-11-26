@@ -3,13 +3,15 @@
 use glam::{Mat3, Quat, Vec3};
 use rook_engine::CameraView;
 use rook_render::{
-    DrawShape, ImagePlacement, Layer, Light, Lighting, MapAlpha, PartInstance, Tonemapper,
+    DrawShape, ImagePlacement, Layer, Light, LightShape, Lighting, LocalLight, MapAlpha,
+    PartInstance, Tonemapper,
 };
 use rook_types::{PartShape, SurfacePattern, TilePattern};
 
 use crate::assets::hex;
 use crate::protocol::{
-    CameraSnapshot, ImageLayerSnapshot, LightingSnapshot, MaterialMapsSnapshot, PartSnapshot, shape,
+    CameraSnapshot, ImageLayerSnapshot, LightSnapshot, LightingSnapshot, MaterialMapsSnapshot,
+    PartSnapshot, shape,
 };
 
 pub(crate) fn quaternion(rotation: Mat3) -> [f32; 4] {
@@ -171,6 +173,27 @@ pub(crate) fn lighting_snapshot(lighting: &Lighting) -> LightingSnapshot {
             Tonemapper::Default => 0,
             Tonemapper::Retro => 1,
         },
+    }
+}
+
+pub(crate) fn light_snapshot(light: &LocalLight) -> LightSnapshot {
+    let (shape, direction, angle) = match light.shape {
+        LightShape::Point => (0, [0.0; 3], 0.0),
+        LightShape::Spot { direction, angle } => {
+            (1, [direction.x, direction.y, direction.z], angle)
+        }
+        LightShape::Surface { direction, angle } => {
+            (2, [direction.x, direction.y, direction.z], angle)
+        }
+    };
+    LightSnapshot {
+        position: vec3(light.position),
+        shape,
+        direction,
+        angle,
+        color: light.color,
+        brightness: light.brightness,
+        range: light.range,
     }
 }
 

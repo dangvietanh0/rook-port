@@ -4140,6 +4140,7 @@ name = "rook-formats"
 version = "0.5.1"
 dependencies = [
  "base64 0.23.1",
+ "glam 0.33.12",
  "lz4_flex",
  "quick-xml 0.42.0",
  "rbx_binary",
@@ -4370,6 +4371,7 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
+ "blake3",
  "clap",
  "futures-util",
  "glam 0.33.12",
@@ -4379,7 +4381,9 @@ dependencies = [
  "rook-content",
  "rook-dom",
  "rook-engine",
+ "rook-formats",
  "rook-gui",
+ "rook-lua",
  "rook-platform",
  "rook-render",
  "rook-scene",

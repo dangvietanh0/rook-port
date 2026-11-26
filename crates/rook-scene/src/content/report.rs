@@ -90,6 +90,16 @@ impl Report {
         }
     }
 
+    /// Forget pending failures whose part is gone: a part may be destroyed
+    /// while the file it waited for is still loading, and its id may not be
+    /// read once collected.
+    pub(crate) fn retain(&mut self, live: impl Fn(InstanceId) -> bool) {
+        self.pending.retain(|(wanter, ..)| match wanter {
+            Wanter::Part(part) => live(*part),
+            Wanter::Sky | Wanter::Gui => true,
+        });
+    }
+
     pub(crate) fn flush(&mut self, dom: &Dom) {
         if self.pending.is_empty() {
             return;

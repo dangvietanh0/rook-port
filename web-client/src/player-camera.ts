@@ -12,7 +12,6 @@ const START_DISTANCE = 12.5;
 const FIRST_PERSON_ENTER = 1.4;
 const FIRST_PERSON_EXIT = 1.8;
 const LOOK_SENSITIVITY = 0.0032;
-const FOLLOW_RATE = 16;
 const ZOOM_RATE = 12;
 const PITCH_LIMIT = THREE.MathUtils.degToRad(85);
 
@@ -80,12 +79,11 @@ export class PlayerCamera {
     const target = pose.position.clone();
     if (player.head === null) target.y += 1.5;
 
-    if (!this.hasTarget) {
-      this.target.copy(target);
-      this.hasTarget = true;
-    } else {
-      this.target.lerp(target, 1 - Math.exp(-dt * FOLLOW_RATE));
-    }
+    // The local character is already drawn from the newest authoritative
+    // transform, so the camera sits on it at once; smoothing here would
+    // put the view behind the player again.
+    this.target.copy(target);
+    this.hasTarget = true;
 
     this.distance += (this.targetDistance - this.distance) * (1 - Math.exp(-dt * ZOOM_RATE));
     const offset = new THREE.Vector3(

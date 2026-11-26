@@ -134,6 +134,21 @@ pub(crate) struct LightingSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct LightSnapshot {
+    pub(crate) position: [f32; 3],
+    /// 0 point, 1 spot, 2 surface.
+    pub(crate) shape: u8,
+    /// The direction a spot or surface light shines, unit length.
+    pub(crate) direction: [f32; 3],
+    /// The cone's full angle in degrees (`SpotLight.Angle`).
+    pub(crate) angle: f32,
+    pub(crate) color: [f32; 3],
+    pub(crate) brightness: f32,
+    pub(crate) range: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CameraSnapshot {
     pub(crate) position: [f32; 3],
     pub(crate) rotation: [f32; 4],
@@ -155,6 +170,59 @@ pub(crate) struct PlayerInfo {
     pub(crate) head: Option<u64>,
     /// Net ids of every drawn character part, image layers included.
     pub(crate) parts: Vec<u64>,
+    /// The standard R6 look the player chose, when they chose one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) avatar: Option<PlayerAvatar>,
+}
+
+/// A chosen Roblox avatar: the six R6 body parts by role, and the classic
+/// shirt and pants the browser composites over their body colours.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlayerAvatar {
+    pub(crate) name: String,
+    pub(crate) user_id: i64,
+    /// Role (`Torso`, `Left Arm`, …) and the net id of that part.
+    pub(crate) body: Vec<(String, u64)>,
+    pub(crate) shirt: Option<String>,
+    pub(crate) pants: Option<String>,
+    /// The official R6 clips, sent with the welcome and the panel's
+    /// answer, never with every snapshot.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) animations: Option<Vec<AnimationClip>>,
+}
+
+/// One R6 animation: its length and the poses at each keyframe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnimationClip {
+    pub(crate) name: String,
+    pub(crate) length: f32,
+    pub(crate) keys: Vec<AnimationKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnimationKey {
+    pub(crate) time: f32,
+    /// Pose name and its joint transform in torso space, as
+    /// `[x, y, z, qx, qy, qz, qw]`.
+    pub(crate) poses: Vec<(String, [f32; 7])>,
+}
+
+/// How the avatar panel's request is going.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AvatarStatus {
+    /// `loading`, `error` or `ready`.
+    pub(crate) state: String,
+    pub(crate) username: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) animations: Option<Vec<AnimationClip>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -166,6 +234,8 @@ pub(crate) struct Welcome {
     pub(crate) meshes: Vec<String>,
     pub(crate) images: Vec<String>,
     pub(crate) lighting: LightingSnapshot,
+    /// Every PointLight, SpotLight and SurfaceLight in Workspace.
+    pub(crate) lights: Vec<LightSnapshot>,
     pub(crate) camera: CameraSnapshot,
     pub(crate) gui: Vec<GuiNode>,
     pub(crate) stats: SessionStats,
@@ -202,6 +272,9 @@ pub(crate) struct Snapshot {
     pub(crate) images: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) lighting: Option<LightingSnapshot>,
+    /// The local lights, when any changed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) lights: Option<Vec<LightSnapshot>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) camera: Option<CameraSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -291,6 +364,7 @@ pub(crate) struct TextStroke {
 pub(crate) enum ServerMessage {
     Welcome { welcome: Welcome },
     Snapshot { snapshot: Snapshot },
+    Avatar { avatar: AvatarStatus },
     Pong { t: f64 },
     Error { message: String },
 }
@@ -338,6 +412,10 @@ pub(crate) enum ClientMessage {
     Move {
         x: f32,
         z: f32,
+    },
+    /// The player typed a Roblox username in the avatar panel.
+    Avatar {
+        username: String,
     },
     Ping {
         t: f64,

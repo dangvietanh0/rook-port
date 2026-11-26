@@ -13,6 +13,7 @@
 //! Decoders are run behind a panic guard: a corrupt file produces a
 //! [`LoadError`], never a crash.
 
+pub mod animation;
 mod chunks;
 mod compare;
 mod compiled;
@@ -20,6 +21,7 @@ mod convert;
 pub mod legacy;
 mod retype;
 
+pub use animation::{Clip, Key, animation, clip};
 pub use compare::{CompareOptions, compare, compare_with};
 pub use compiled::{CompiledScript, compiled_scripts};
 pub use convert::{Converted, Placing, Tree, copy_into_dom, from_dom, into_dom};

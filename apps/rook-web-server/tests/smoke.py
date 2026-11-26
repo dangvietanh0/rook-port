@@ -178,15 +178,22 @@ async def read_messages() -> None:
         assert distance > 0.25, f"the character barely moved: {distance}"
         print("moved", round(distance, 2), "studs")
 
-        # Zero stops it.
+        # Zero stops it. Snapshots arrive every simulation tick, and the
+        # socket may still hold frames from before the zero, so wait for a
+        # run of frames that show no movement rather than counting reads.
         await socket.send(msgpack.packb({"kind": "move", "x": 0.0, "z": 0.0}))
-        for _ in range(12):
+        quiet = 0
+        last = positions[root]
+        deadline = time.monotonic() + 20
+        while quiet < 20 and time.monotonic() < deadline:
             snapshot = msgpack.unpackb(await asyncio.wait_for(socket.recv(), 30), raw=False)
             apply_snapshot(positions, snapshot["snapshot"])
-        stopped = positions[root]
-        drift = sum((stopped[i] - moved[i]) ** 2 for i in range(3)) ** 0.5
-        assert drift < 1.0, f"the character kept walking: {drift}"
-        print("stopped", round(drift, 2), "studs after zero")
+            now = positions[root]
+            step = sum((now[i] - last[i]) ** 2 for i in range(3)) ** 0.5
+            last = now
+            quiet = quiet + 1 if step < 0.01 else 0
+        assert quiet >= 20, "the character never stopped"
+        print("stopped")
 
 
 def main() -> None:

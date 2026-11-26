@@ -9,7 +9,7 @@ use anyhow::Context;
 
 #[cfg(feature = "repl")]
 use rook_engine::console::repl::Side;
-use rook_engine::session::host::{ClientHost, ServerHost};
+use rook_engine::session::host::{ClientHost, ServerHost, ToServer};
 use rook_engine::session::server_thread::{ServerThread, Started, Starting};
 use rook_engine::settings::user_settings::PlayerSettings;
 use rook_engine::{DataModel, InputEvent, Options, console};
@@ -280,6 +280,28 @@ impl Game {
 
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.view_mut().set_viewport(width, height);
+    }
+
+    /// Give the local player a standard Roblox avatar (the web port's
+    /// in-game username panel). The server thread applies it and respawns
+    /// the character; Run mode has no player to change.
+    pub fn apply_avatar(&self, name: &str, user_id: i64, avatar: rook_lua::Avatar) {
+        if let Mode::Play { server, .. } = &self.mode {
+            server.deliver(ToServer::Avatar {
+                name: name.to_owned(),
+                user_id,
+                avatar,
+            });
+        }
+    }
+
+    /// Wear the standard R6 body until a username is chosen. The web port
+    /// calls this before the first server step, so the first spawn is R6
+    /// rather than the place's StarterCharacter.
+    pub fn standard_body(&self) {
+        if let Mode::Play { server, .. } = &self.mode {
+            server.deliver(ToServer::StandardBody);
+        }
     }
 
     /// One frame of the whole game in lockstep: the server steps, its

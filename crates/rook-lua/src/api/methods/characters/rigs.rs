@@ -36,16 +36,24 @@ impl std::fmt::Debug for RigSource {
 /// StarterPlayer), else the rig the game's avatar setting picks (the
 /// player's own with PlayerChoice) dressed in the player's look.
 pub(super) fn body(w: &mut World, player: InstanceId) -> Result<InstanceId, DomError> {
-    let starter = w
-        .dom
-        .find_service("StarterPlayer")
-        .and_then(|sp| w.dom.find_first_child(sp, "StarterCharacter", false))
-        .filter(|&c| w.dom.is_a(c, "Model"));
+    let standard = w.standard_avatars.contains(&player);
+    let starter = (!standard)
+        .then(|| {
+            w.dom
+                .find_service("StarterPlayer")
+                .and_then(|sp| w.dom.find_first_child(sp, "StarterCharacter", false))
+                .filter(|&c| w.dom.is_a(c, "Model"))
+        })
+        .flatten();
     let avatar = w.avatars.get(&player).cloned().unwrap_or_default();
     let model = match starter.and_then(|c| w.dom.clone_instance(c)) {
         Some(model) => model,
         None => {
-            let rig = rig_type(&w.dom, &avatar);
+            let rig = if standard {
+                RigType::R6
+            } else {
+                rig_type(&w.dom, &avatar)
+            };
             let built = match (rig, w.rigs.clone()) {
                 (RigType::R15, Some(source)) => (source.0)(&mut w.dom, RigType::R15),
                 _ => None,

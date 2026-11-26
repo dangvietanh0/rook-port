@@ -4,8 +4,10 @@
 import * as THREE from "three";
 import type {
   CameraSnapshot,
+  LightSnapshot,
   Lighting,
   PartSnapshot,
+  PlayerAvatar,
   PlayerInfo,
   Snapshot,
   Welcome,
@@ -13,6 +15,8 @@ import type {
 import { PLACEMENT, SHAPE } from "./protocol";
 import { MeshCache, Textures } from "./mesh";
 import { decalMaterial, instancedMaterial, partMaterial, srgb, tinted } from "./materials";
+import { AvatarDresser, avatarGeometry } from "./avatar";
+import { R6_ROLES, R6Animator } from "./r6";
 
 const SNAPSHOT_MS = 50;
 /** Camera collision cell size in studs, and the span past which a box is
@@ -24,6 +28,7 @@ const UNIT_BOX = new THREE.Box3(
   new THREE.Vector3(0.5, 0.5, 0.5),
 );
 const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
+const UNIT_SCALE = new THREE.Vector3(1, 1, 1);
 
 export interface Trs {
   position: THREE.Vector3;
@@ -86,6 +91,7 @@ interface Atom {
   object?: THREE.Object3D;
   ownedGeometry?: THREE.BufferGeometry;
   ownedMaterial?: THREE.Material;
+  ownedMaterials?: THREE.Material[];
   meshRequested?: string;
   /** A decal plane's face turn and local offset, in the part's axes. */
   plane?: { turn: THREE.Quaternion; offset: THREE.Vector3 };
@@ -328,6 +334,14 @@ export class World {
   private sky = new Sky();
   private skyboxKey = "";
   private lighting?: Lighting;
+  private lights: LightSnapshot[] = [];
+  private lightObjects = new Map<number, THREE.Light>();
+  private dresser = new AvatarDresser();
+  private animator = new R6Animator();
+  private avatarParts = new Map<string, number>();
+  private avatarRoles = new Map<number, string>();
+  private avatarKey = "";
+  private animationKey = "";
   private readonly maxPixelRatio: number;
   private readonly adaptive: boolean;
   private pixelRatio: number;
@@ -396,6 +410,7 @@ export class World {
     this.setPlayer(welcome.player);
     this.lighting = welcome.lighting;
     this.applyLighting(welcome.lighting);
+    this.applyLights(welcome.lights);
     this.applyCamera(welcome.camera);
     for (const part of welcome.parts) this.addPart(part, performance.now());
     // The welcome's transfer time shouldn't count against the frame rate.
@@ -411,6 +426,7 @@ export class World {
       this.lighting = snapshot.lighting;
       this.applyLighting(snapshot.lighting);
     }
+    if (snapshot.lights) this.applyLights(snapshot.lights);
     if (snapshot.camera) {
       this.cameraScripted = snapshot.camera.scripted;
       if (snapshot.camera.scripted) this.applyCamera(snapshot.camera);
@@ -428,14 +444,22 @@ export class World {
       // `size` only rides along when it changed; remember it, so the next
       // move of an unchanged part still scales to the server's size.
       if (update.size) atom.snap.size = update.size;
-      atom.from = current;
       atom.to = {
         position: new THREE.Vector3(...update.position),
         quaternion: new THREE.Quaternion(update.rotation[0], update.rotation[1], update.rotation[2], update.rotation[3]),
         scale: new THREE.Vector3(...atom.snap.size),
       };
       atom.changedAt = now;
-      atom.moving = true;
+      if (this.localParts.has(update.id)) {
+        // The local player's own body is never shown a tick behind: the
+        // server already stepped before this snapshot was sent.
+        atom.from = copyTrs(atom.to);
+        atom.moving = false;
+        this.place(atom, atom.to);
+      } else {
+        atom.from = current;
+        atom.moving = true;
+      }
     }
     for (const part of snapshot.updatedProps) this.updatePart(part, now);
   }
@@ -452,11 +476,57 @@ export class World {
   private setPlayer(player: PlayerInfo | null): void {
     this.player = player;
     this.localParts.clear();
-    if (!player) return;
+    if (!player) {
+      this.setAvatar(null);
+      return;
+    }
     if (player.root !== null) this.localParts.add(player.root);
     if (player.head !== null) this.localParts.add(player.head);
     for (const id of player.parts) this.localParts.add(id);
     for (const id of this.localParts) this.unindexCollision(id);
+    this.setAvatar(player.avatar ?? null);
+  }
+
+  /** Take a chosen look: its six body parts, its garment images and its
+   * animation clips. Only a change rebuilds anything. */
+  private setAvatar(avatar: PlayerAvatar | null): void {
+    const key = avatar
+      ? `${avatar.userId}|${avatar.shirt ?? ""}|${avatar.pants ?? ""}|${avatar.body
+          .map(([role, id]) => `${role}:${id}`)
+          .join(",")}`
+      : "";
+    if (key !== this.avatarKey) {
+      this.avatarKey = key;
+      this.avatarParts.clear();
+      this.avatarRoles.clear();
+      if (avatar) {
+        for (const [role, id] of avatar.body) {
+          this.avatarParts.set(role, id);
+          this.avatarRoles.set(id, role);
+        }
+      }
+      this.dresser.set(avatar?.shirt ?? null, avatar?.pants ?? null, () => this.redressAvatar());
+      this.redressAvatar();
+    }
+    if (avatar?.animations?.length) {
+      const animationKey = `${avatar.userId}|${avatar.animations.length}|${avatar.animations[0]?.keys.length ?? 0}`;
+      if (animationKey !== this.animationKey) {
+        this.animationKey = animationKey;
+        this.animator.setClips(avatar.animations);
+      }
+    }
+  }
+
+  /** Rebuild the six body parts after their garments or face arrived. */
+  private redressAvatar(): void {
+    for (const id of this.avatarRoles.keys()) {
+      const atom = this.parts.get(id);
+      if (!atom) continue;
+      this.removeVisual(atom);
+      this.createVisual(atom);
+      this.place(atom, atom.to);
+      atom.moving = false;
+    }
   }
 
   /** Hide the local character, or restore it. Zero-scaling pool slots and
@@ -486,6 +556,7 @@ export class World {
   partTransform(id: number, now: number): Trs | undefined {
     const atom = this.parts.get(id);
     if (!atom) return undefined;
+    if (this.localParts.has(id)) return atom.to;
     return atom.moving ? this.trsAt(atom, now) : atom.to;
   }
 
@@ -702,7 +773,7 @@ export class World {
     atom.from = current;
     atom.to = trsOf(snap);
     atom.changedAt = now;
-    atom.moving = true;
+    atom.moving = !this.localParts.has(snap.id);
     this.createVisual(atom);
     this.indexCollision(snap, atom.to);
   }
@@ -729,6 +800,10 @@ export class World {
     atom.ownedGeometry = undefined;
     atom.ownedMaterial?.dispose();
     atom.ownedMaterial = undefined;
+    if (atom.ownedMaterials) {
+      for (const material of atom.ownedMaterials) material.dispose();
+      atom.ownedMaterials = undefined;
+    }
     atom.plane = undefined;
     atom.meshRequested = undefined;
   }
@@ -779,6 +854,10 @@ export class World {
       this.createFile(atom);
       return;
     }
+    if (this.avatarRoles.has(atom.snap.id)) {
+      this.createAvatarPart(atom);
+      return;
+    }
     if (this.canInstance(atom.snap)) {
       this.createInstanced(atom);
       return;
@@ -822,6 +901,27 @@ export class World {
     mesh.renderOrder = snap.onTop ? 1000 : 0;
     atom.object = mesh;
     atom.ownedMaterial = material;
+    this.scene.add(mesh);
+    this.place(atom, atom.from);
+  }
+
+  /** A standard R6 body part: the template atlas on the torso and limbs,
+   * the default face on the head's front. Drawn on its own because the
+   * clothing needs its own geometry and material. */
+  private createAvatarPart(atom: Atom): void {
+    const snap = atom.snap;
+    const role = this.avatarRoles.get(snap.id);
+    if (!role) return;
+    const geometry =
+      role === "Head" ? geometryForShape(snap.shape) : avatarGeometry(role);
+    if (!geometry) return;
+    const materials = this.dresser.materials(role, snap.color);
+    const mesh = new THREE.Mesh(geometry, materials);
+    mesh.castShadow = snap.castShadow && snap.transparency < 0.999;
+    mesh.receiveShadow = snap.transparency < 0.999;
+    mesh.renderOrder = snap.onTop ? 1000 : 0;
+    atom.object = mesh;
+    atom.ownedMaterials = Array.isArray(materials) ? materials : [materials];
     this.scene.add(mesh);
     this.place(atom, atom.from);
   }
@@ -999,10 +1099,118 @@ export class World {
     }
   }
 
+  /** The panel's answer carries the clips; the snapshots that follow
+   * only carry the body. */
+  setAvatarAnimations(clips: import("./protocol").AnimationClip[]): void {
+    if (clips.length === 0) return;
+    this.animationKey = "panel";
+    this.animator.setClips(clips);
+  }
+
+  /** Replace the local lights. They change rarely, so rebuilding the
+   * Three lights here keeps the per-frame work to picking the nearest. */
+  private applyLights(lights: LightSnapshot[]): void {
+    for (const light of this.lightObjects.values()) {
+      light.removeFromParent();
+      if (light instanceof THREE.SpotLight) light.target.removeFromParent();
+      light.dispose();
+    }
+    this.lightObjects.clear();
+    this.lights = lights;
+  }
+
+  /** Keep at most 24 local lights alive around the camera: a room's lamp
+   * must reach the browser, but a place with hundreds must not stall it. */
+  private updateLights(): void {
+    if (this.lights.length === 0) {
+      for (const light of this.lightObjects.values()) light.visible = false;
+      return;
+    }
+    const eye = this.camera.position;
+    const nearest = this.lights
+      .map((light, index) => {
+        const dx = light.position[0] - eye.x;
+        const dy = light.position[1] - eye.y;
+        const dz = light.position[2] - eye.z;
+        return [index, dx * dx + dy * dy + dz * dz] as const;
+      })
+      .sort((a, b) => a[1] - b[1])
+      .slice(0, 24)
+      .map(([index]) => index);
+    const keep = new Set(nearest);
+    for (const [index, light] of this.lightObjects) {
+      if (!keep.has(index)) light.visible = false;
+    }
+    for (const index of nearest) {
+      const snap = this.lights[index];
+      let light = this.lightObjects.get(index);
+      if (!light) {
+        light = this.makeLight(snap);
+        this.lightObjects.set(index, light);
+        this.scene.add(light);
+        if (light instanceof THREE.SpotLight) this.scene.add(light.target);
+      }
+      light.visible = snap.brightness > 0;
+      light.color.copy(srgb(snap.color));
+      light.intensity = Math.max(0, snap.brightness) * 4;
+      light.position.set(snap.position[0], snap.position[1], snap.position[2]);
+      if (light instanceof THREE.SpotLight) {
+        light.distance = Math.max(0.1, snap.range);
+        const angle = Math.max(0.02, Math.min(Math.PI / 2 - 0.01, (snap.angle * Math.PI) / 360));
+        light.angle = angle;
+        light.target.position.set(
+          snap.position[0] + snap.direction[0] * snap.range,
+          snap.position[1] + snap.direction[1] * snap.range,
+          snap.position[2] + snap.direction[2] * snap.range,
+        );
+        light.target.updateMatrixWorld();
+      } else if (light instanceof THREE.PointLight) {
+        light.distance = Math.max(0.1, snap.range);
+      }
+    }
+  }
+
+  private makeLight(snap: LightSnapshot): THREE.Light {
+    if (snap.shape === 0) {
+      return new THREE.PointLight(0xffffff, 1, 8, 1);
+    }
+    const light = new THREE.SpotLight(0xffffff, 1, 8, Math.PI / 4, 0.2, 1);
+    light.target = new THREE.Object3D();
+    return light;
+  }
+
+  /** Put the six body parts where the current clip says they are. The
+   * server's root is authoritative; the limbs hang from it. */
+  private animateAvatar(dt: number): void {
+    const root = this.player?.root;
+    if (root == null || this.avatarParts.size === 0) return;
+    const rootAtom = this.parts.get(root);
+    if (!rootAtom) return;
+    const locals = this.animator.update(dt, rootAtom.to.position);
+    if (!locals) return;
+    const rootMatrix = new THREE.Matrix4().compose(
+      rootAtom.to.position,
+      rootAtom.to.quaternion,
+      UNIT_SCALE,
+    );
+    const torso = rootMatrix.multiply(locals.get("Torso")!);
+    for (const role of R6_ROLES) {
+      const id = this.avatarParts.get(role);
+      if (id === undefined) continue;
+      const atom = this.parts.get(id);
+      if (!atom?.object) continue;
+      const world = torso.clone().multiply(locals.get(role)!);
+      atom.object.position.setFromMatrixPosition(world);
+      atom.object.quaternion.setFromRotationMatrix(world);
+    }
+  }
+
   /** Light the sun and sky around this frame's camera, then draw. */
-  render(now: number): void {
+  render(now: number, dt: number): void {
     if (this.lighting) this.sunPosition(new THREE.Vector3(...this.lighting.sunDirection));
     this.sky.mesh.position.copy(this.camera.position);
+    this.animateAvatar(dt);
+    this.updateLights();
     this.renderer.render(this.scene, this.camera);
     this.adapt(now);
   }

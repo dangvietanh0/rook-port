@@ -76,6 +76,18 @@ export interface Lighting {
   tonemapper: number;
 }
 
+export interface LightSnapshot {
+  position: Vec3;
+  /** 0 point, 1 spot, 2 surface. */
+  shape: number;
+  direction: Vec3;
+  /** The cone's full angle in degrees. */
+  angle: number;
+  color: Vec3;
+  brightness: number;
+  range: number;
+}
+
 export interface CameraSnapshot {
   position: Vec3;
   rotation: Quat;
@@ -142,6 +154,38 @@ export interface SessionStats {
   simulatedSeconds: number;
 }
 
+export interface PlayerAvatar {
+  name: string;
+  userId: number;
+  /** Role (`Torso`, `Left Arm`, …) and the net id of that part. */
+  body: [string, number][];
+  shirt: string | null;
+  pants: string | null;
+  /** The official R6 clips, present on the welcome and the panel's answer. */
+  animations?: AnimationClip[];
+}
+
+export interface AnimationKey {
+  time: number;
+  /** Pose name and its joint transform, `[x, y, z, qx, qy, qz, qw]`. */
+  poses: [string, [number, number, number, number, number, number, number]][];
+}
+
+export interface AnimationClip {
+  name: string;
+  length: number;
+  keys: AnimationKey[];
+}
+
+export interface AvatarStatus {
+  /** `loading`, `error` or `ready`. */
+  state: string;
+  username: string;
+  name?: string;
+  message?: string;
+  animations?: AnimationClip[];
+}
+
 export interface PlayerInfo {
   /** Net id of the HumanoidRootPart. */
   root: number | null;
@@ -149,6 +193,7 @@ export interface PlayerInfo {
   head: number | null;
   /** Every drawn character part, image layers included. */
   parts: number[];
+  avatar?: PlayerAvatar;
 }
 
 export interface Welcome {
@@ -158,6 +203,8 @@ export interface Welcome {
   meshes: string[];
   images: string[];
   lighting: Lighting;
+  /** Every PointLight, SpotLight and SurfaceLight in Workspace. */
+  lights: LightSnapshot[];
   camera: CameraSnapshot;
   gui: GuiNode[];
   stats: SessionStats;
@@ -185,6 +232,7 @@ export interface Snapshot {
   meshes: string[];
   images: string[];
   lighting?: Lighting;
+  lights?: LightSnapshot[];
   camera?: CameraSnapshot;
   gui?: GuiNode[] | null;
   player: PlayerInfo | null;
@@ -194,6 +242,7 @@ export interface Snapshot {
 export type ServerMessage =
   | { kind: "welcome"; welcome: Welcome }
   | { kind: "snapshot"; snapshot: Snapshot }
+  | { kind: "avatar"; avatar: AvatarStatus }
   | { kind: "pong"; t: number }
   | { kind: "error"; message: string };
 
@@ -208,6 +257,7 @@ export type ClientMessage =
   | { kind: "resize"; width: number; height: number }
   | { kind: "camera"; position: Vec3 }
   | { kind: "move"; x: number; z: number }
+  | { kind: "avatar"; username: string }
   | { kind: "ping"; t: number };
 
 export const SHAPE = {

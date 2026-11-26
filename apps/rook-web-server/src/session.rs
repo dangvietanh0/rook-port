@@ -23,16 +23,17 @@ use tokio::sync::broadcast;
 
 use crate::assets::{self, ImageStore, MeshStore};
 use crate::protocol::{
-    CameraSnapshot, GuiNode, PartSnapshot, PlayerInfo, ServerMessage, SessionStats, Snapshot,
-    Welcome,
+    AnimationClip, CameraSnapshot, GuiNode, PartSnapshot, PlayerAvatar, PlayerInfo, ServerMessage,
+    SessionStats, Snapshot, Welcome,
 };
 use crate::snapshot;
 
 /// Rook's simulation step, 60 Hz as Roblox's scheduler runs.
 pub(crate) const STEP: Duration = Duration::from_nanos(16_666_667);
-/// How often the browser is sent a snapshot. Transforms are interpolated
-/// there, so 20 Hz looks smooth and costs a third of 60 Hz.
-pub(crate) const SNAPSHOT: Duration = Duration::from_millis(50);
+/// How often the browser is sent a snapshot: every simulation tick, so the
+/// local player's own pose is never behind. Remote parts interpolate in the
+/// browser between them.
+pub(crate) const SNAPSHOT: Duration = STEP;
 
 /// What the async side asks the session to do.
 #[derive(Debug)]
@@ -57,6 +58,49 @@ pub(crate) enum Command {
     /// scene as it is now. A welcome serialized at startup would be stale
     /// for a player who joins later.
     Welcome(tokio::sync::oneshot::Sender<anyhow::Result<Vec<u8>>>),
+    /// The avatar panel resolved a username off-thread. Apply it, respawn
+    /// the player, and answer once the new body is in the scene.
+    Avatar {
+        /// The request this came from, so a slow earlier lookup can't
+        /// replace a newer one.
+        generation: u64,
+        name: String,
+        user_id: i64,
+        avatar: rook_lua::Avatar,
+        shirt: Option<Arc<[u8]>>,
+        pants: Option<Arc<[u8]>>,
+        animations: Arc<Vec<AnimationClip>>,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+}
+
+/// The standard R6 body parts the browser dresses.
+const R6_ROLES: [&str; 6] = [
+    "Head",
+    "Torso",
+    "Left Arm",
+    "Right Arm",
+    "Left Leg",
+    "Right Leg",
+];
+
+/// The chosen look, kept across respawns; the net ids are read fresh from
+/// the current character each snapshot.
+#[derive(Debug, Clone)]
+struct AvatarState {
+    name: String,
+    user_id: i64,
+    shirt: Option<[u8; 32]>,
+    pants: Option<[u8; 32]>,
+    animations: Arc<Vec<AnimationClip>>,
+}
+
+/// An avatar waiting for its new character to reach the client DataModel.
+struct PendingAvatar {
+    reply: std::sync::mpsc::Sender<Result<(), String>>,
+    /// The character before the respawn, so a stale one doesn't count.
+    old: Option<InstanceId>,
+    started: Instant,
 }
 
 /// What the HTTP handlers and the WebSocket handshake read. The session
@@ -204,6 +248,9 @@ fn run(
     };
     // The server thread paces itself at 60 Hz, as Play mode does in the
     // window; `advance` then only drains what it sent.
+    // Before the first step, so the player's first spawn is the standard
+    // R6 body the browser dresses.
+    game.standard_body();
     game.free_run();
     game.set_viewport(1280, 720);
     let saved_camera = game.saved_camera();
@@ -248,6 +295,13 @@ struct Session<'a> {
     /// last sent one. A quiet client stops walking.
     move_vector: Vec3,
     move_at: Option<Instant>,
+    /// The standard avatar the player chose, and the newest request number
+    /// accepted (a slower older lookup must not win).
+    avatar: Option<AvatarState>,
+    avatar_generation: u64,
+    pending_avatar: Option<PendingAvatar>,
+    /// The local lights changed since the last snapshot.
+    lights_changed: bool,
 }
 
 impl<'a> Session<'a> {
@@ -279,6 +333,10 @@ impl<'a> Session<'a> {
             gui_generation: None,
             move_vector: Vec3::ZERO,
             move_at: None,
+            avatar: None,
+            avatar_generation: 0,
+            pending_avatar: None,
+            lights_changed: true,
         }
     }
 
@@ -317,6 +375,7 @@ impl<'a> Session<'a> {
             last = frame_start;
             self.game.advance(dt);
             self.step_scene();
+            self.finish_avatar();
 
             if frame_start >= next_snapshot {
                 self.send_snapshot();
@@ -349,7 +408,78 @@ impl<'a> Session<'a> {
                 self.send_snapshot();
                 let _ = reply.send(self.welcome_bytes());
             }
+            Command::Avatar {
+                generation,
+                name,
+                user_id,
+                avatar,
+                shirt,
+                pants,
+                animations,
+                reply,
+            } => {
+                if generation < self.avatar_generation {
+                    let _ = reply.send(Err("A newer avatar was chosen.".to_owned()));
+                    return;
+                }
+                self.avatar_generation = generation;
+                let shirt = shirt.map(|png| {
+                    let hash = blake3::hash(&png);
+                    let mut shared = self.shared.lock().expect("session shared");
+                    shared.images.put_png(hash.into(), png);
+                    hash.into()
+                });
+                let pants = pants.map(|png| {
+                    let hash = blake3::hash(&png);
+                    let mut shared = self.shared.lock().expect("session shared");
+                    shared.images.put_png(hash.into(), png);
+                    hash.into()
+                });
+                let old = local_character(&self.game.view().runtime().world().dom);
+                self.avatar = Some(AvatarState {
+                    name: name.clone(),
+                    user_id,
+                    shirt,
+                    pants,
+                    animations,
+                });
+                self.pending_avatar = Some(PendingAvatar {
+                    reply,
+                    old,
+                    started: Instant::now(),
+                });
+                self.game.apply_avatar(&name, user_id, avatar);
+            }
         }
+    }
+
+    /// Answer a pending avatar once the respawned body is in the client
+    /// DataModel and has net ids the browser can dress.
+    fn finish_avatar(&mut self) {
+        let Some(pending) = &self.pending_avatar else {
+            return;
+        };
+        let dom = &self.game.view().runtime().world().dom;
+        let current = local_character(dom);
+        let ready = current.is_some_and(|character| {
+            Some(character) != pending.old
+                && R6_ROLES.iter().all(|role| {
+                    dom.find_first_child(character, role, true)
+                        .and_then(|part| self.net_ids.base_id(part.to_ref().0))
+                        .is_some()
+                })
+        });
+        if !ready {
+            if pending.started.elapsed() > Duration::from_secs(8) {
+                let pending = self.pending_avatar.take().expect("pending avatar");
+                let _ = pending
+                    .reply
+                    .send(Err("The new character didn't appear.".to_owned()));
+            }
+            return;
+        }
+        let pending = self.pending_avatar.take().expect("pending avatar");
+        let _ = pending.reply.send(Ok(()));
     }
 
     /// Bring the scene up to date with the step and the files that arrived
@@ -362,6 +492,7 @@ impl<'a> Session<'a> {
                 .map_or(self.client_camera, |v| v.cframe.position)
         });
         let mut to_render = self.cache.update(self.game.view_mut(), focus);
+        self.lights_changed |= self.cache.take_lights_change();
         self.take_images(&mut to_render);
         for hash in to_render.take_dropped_meshes() {
             let shared = Arc::clone(self.shared);
@@ -434,8 +565,10 @@ impl<'a> Session<'a> {
         self.game.view().scripted_camera()
     }
 
-    /// The local character as the browser follows and hides it.
-    fn player_info(&self) -> Option<PlayerInfo> {
+    /// The local character as the browser follows and hides it. The
+    /// clips are large and never change, so only the welcome carries
+    /// them; snapshots say the body is still the chosen one.
+    fn player_info(&self, with_animations: bool) -> Option<PlayerInfo> {
         let world = self.game.view().runtime().world();
         let dom = &world.dom;
         let character = local_character(dom)?;
@@ -445,10 +578,56 @@ impl<'a> Session<'a> {
         for id in std::iter::once(character).chain(dom.descendants(character)) {
             parts.extend_from_slice(self.net_ids.ids_of(id.to_ref().0));
         }
+        let body: Vec<(String, u64)> = R6_ROLES
+            .iter()
+            .filter_map(|role| {
+                let part = dom.find_first_child(character, role, true)?;
+                let id = self.net_ids.base_id(part.to_ref().0)?;
+                Some(((*role).to_owned(), id))
+            })
+            .collect();
+        // A standard R6 body is always dressable, even before a username
+        // is chosen: the browser uses these ids to animate and clothe it.
+        let avatar = (body.len() == R6_ROLES.len()).then(|| {
+            let player = dom.local_player();
+            let name = self.avatar.as_ref().map_or_else(
+                || player.map_or(String::new(), |p| dom.name(p).to_owned()),
+                |a| a.name.clone(),
+            );
+            let user_id = self.avatar.as_ref().map_or_else(
+                || {
+                    player
+                        .and_then(|p| dom.number_property(p, "UserId"))
+                        .unwrap_or(0.0) as i64
+                },
+                |a| a.user_id,
+            );
+            let animations = with_animations
+                .then(|| self.avatar.as_ref().map(|a| a.animations.as_ref().clone()))
+                .flatten()
+                .filter(|clips| !clips.is_empty());
+            PlayerAvatar {
+                name,
+                user_id,
+                body,
+                shirt: self
+                    .avatar
+                    .as_ref()
+                    .and_then(|a| a.shirt.as_ref())
+                    .map(|hash| format!("/api/image/{}", assets::hex(hash))),
+                pants: self
+                    .avatar
+                    .as_ref()
+                    .and_then(|a| a.pants.as_ref())
+                    .map(|hash| format!("/api/image/{}", assets::hex(hash))),
+                animations,
+            }
+        });
         Some(PlayerInfo {
             root: root.and_then(|id| self.net_ids.base_id(id.to_ref().0)),
             head: head.and_then(|id| self.net_ids.base_id(id.to_ref().0)),
             parts,
+            avatar,
         })
     }
 
@@ -572,6 +751,13 @@ impl<'a> Session<'a> {
             meshes: self.all_hashes_meshes(),
             images: self.all_hashes_images(),
             lighting: snapshot::lighting_snapshot(&self.cache.scene.lighting),
+            lights: self
+                .cache
+                .scene
+                .lights
+                .iter()
+                .map(snapshot::light_snapshot)
+                .collect(),
             camera: self.camera_snapshot(),
             gui,
             stats: SessionStats {
@@ -581,7 +767,7 @@ impl<'a> Session<'a> {
                 server_tick: self.tick,
                 simulated_seconds: self.game.view().now(),
             },
-            player: self.player_info(),
+            player: self.player_info(true),
             play: self.play,
             controller: self.play && !self.has_own_controller(),
         }
@@ -734,9 +920,17 @@ impl<'a> Session<'a> {
             meshes: std::mem::take(&mut self.new_meshes),
             images: std::mem::take(&mut self.new_images),
             lighting: Some(snapshot::lighting_snapshot(&self.cache.scene.lighting)),
+            lights: std::mem::take(&mut self.lights_changed).then(|| {
+                self.cache
+                    .scene
+                    .lights
+                    .iter()
+                    .map(snapshot::light_snapshot)
+                    .collect()
+            }),
             camera: Some(self.camera_snapshot()),
             gui,
-            player: self.player_info(),
+            player: self.player_info(false),
             stats,
         };
         self.tick += 1;

@@ -12,6 +12,7 @@
 //! ```
 
 mod assets;
+mod avatar;
 mod gui;
 mod protocol;
 mod session;
@@ -19,7 +20,9 @@ mod snapshot;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -36,7 +39,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::protocol::{ClientMessage, ServerMessage};
+use crate::protocol::{AvatarStatus, ClientMessage, ServerMessage};
 use crate::session::{Command, Shared};
 
 #[derive(Debug, Parser)]
@@ -68,6 +71,9 @@ struct AppState {
     shared: Arc<Mutex<Shared>>,
     frames: broadcast::Sender<Vec<u8>>,
     commands: std::sync::mpsc::Sender<Command>,
+    /// The newest avatar request: an older lookup that finishes late must
+    /// not replace a newer choice.
+    avatar_generation: Arc<AtomicU64>,
 }
 
 #[tokio::main]
@@ -103,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         shared,
         frames,
         commands,
+        avatar_generation: Arc::new(AtomicU64::new(0)),
     };
 
     let index = web_root.join("index.html");
@@ -110,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/mesh/{hash}", get(mesh))
         .route("/api/image/{hash}", get(image))
+        .route("/api/animations", get(animations))
         .route("/api/health", get(health))
         .route("/ws", get(websocket))
         .fallback_service(files)
@@ -180,6 +188,23 @@ async fn image(State(state): State<AppState>, Path(hash): Path<String>) -> Respo
         .into_response()
 }
 
+async fn animations() -> Response {
+    let clips = tokio::task::spawn_blocking(avatar::animations)
+        .await
+        .unwrap_or_else(|_| Arc::new(Vec::new()));
+    match serde_json::to_vec(&*clips) {
+        Ok(body) => (
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "public, max-age=3600"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 async fn health(State(state): State<AppState>) -> Response {
     let (ready, meshes, images) = {
         let shared = state.shared.lock().expect("session shared");
@@ -246,6 +271,9 @@ async fn client(socket: WebSocket, state: AppState) {
     if sink.send(Message::Binary(welcome.into())).await.is_err() {
         return;
     }
+    // Avatar lookups run on blocking workers and answer here, so a slow
+    // network never stalls this connection's snapshots.
+    let (status, mut statuses) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     loop {
         tokio::select! {
             frame = frames.recv() => match frame {
@@ -257,6 +285,13 @@ async fn client(socket: WebSocket, state: AppState) {
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            bytes = statuses.recv() => {
+                if let Some(bytes) = bytes
+                    && sink.send(Message::Binary(bytes.into())).await.is_err()
+                {
+                    break;
+                }
+            }
             message = stream.next() => match message {
                 Some(Ok(Message::Binary(bytes))) => match rmp_serde::from_slice::<ClientMessage>(&bytes) {
                     Ok(ClientMessage::Ping { t }) => {
@@ -267,10 +302,40 @@ async fn client(socket: WebSocket, state: AppState) {
                             break;
                         }
                     }
+                    Ok(ClientMessage::Avatar { username }) => {
+                        let loading = ServerMessage::Avatar { avatar: AvatarStatus {
+                            state: "loading".to_owned(),
+                            username: username.clone(),
+                            name: None,
+                            message: None,
+                            animations: None,
+                        } };
+                        if let Ok(bytes) = rmp_serde::to_vec_named(&loading)
+                            && sink.send(Message::Binary(bytes.into())).await.is_err()
+                        {
+                            break;
+                        }
+                        request_avatar(username, &state, status.clone());
+                    }
                     Ok(message) => handle(message, &state),
                     Err(error) => eprintln!("bad client message: {error}"),
                 },
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(ClientMessage::Avatar { username }) => {
+                        let loading = ServerMessage::Avatar { avatar: AvatarStatus {
+                            state: "loading".to_owned(),
+                            username: username.clone(),
+                            name: None,
+                            message: None,
+                            animations: None,
+                        } };
+                        if let Ok(bytes) = rmp_serde::to_vec_named(&loading)
+                            && sink.send(Message::Binary(bytes.into())).await.is_err()
+                        {
+                            break;
+                        }
+                        request_avatar(username, &state, status.clone());
+                    }
                     Ok(message) => handle(message, &state),
                     Err(error) => eprintln!("bad client message: {error}"),
                 },
@@ -279,6 +344,64 @@ async fn client(socket: WebSocket, state: AppState) {
             },
         }
     }
+}
+
+/// Resolve a username on a blocking worker, ask the session to apply it,
+/// and send the panel the final state.
+fn request_avatar(
+    username: String,
+    state: &AppState,
+    status: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let generation = state.avatar_generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let commands = state.commands.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut avatar_status = AvatarStatus {
+            state: "error".to_owned(),
+            username,
+            name: None,
+            message: None,
+            animations: None,
+        };
+        match avatar::resolve(&avatar_status.username) {
+            Ok(resolved) => {
+                let (reply, reply_rx) = std::sync::mpsc::channel();
+                let sent = commands.send(Command::Avatar {
+                    generation,
+                    name: resolved.name.clone(),
+                    user_id: resolved.user_id,
+                    avatar: resolved.avatar,
+                    shirt: resolved.shirt,
+                    pants: resolved.pants,
+                    animations: Arc::clone(&resolved.animations),
+                    reply,
+                });
+                if sent.is_err() {
+                    avatar_status.message = Some("The session has stopped.".to_owned());
+                } else {
+                    match reply_rx.recv_timeout(Duration::from_secs(10)) {
+                        Ok(Ok(())) => {
+                            avatar_status.state = "ready".to_owned();
+                            avatar_status.name = Some(resolved.name);
+                            avatar_status.animations = Some(resolved.animations.as_ref().clone());
+                        }
+                        Ok(Err(message)) => avatar_status.message = Some(message),
+                        Err(_) => {
+                            avatar_status.message =
+                                Some("The new character didn't appear.".to_owned());
+                        }
+                    }
+                }
+            }
+            Err(message) => avatar_status.message = Some(message),
+        }
+        let message = ServerMessage::Avatar {
+            avatar: avatar_status,
+        };
+        if let Ok(bytes) = rmp_serde::to_vec_named(&message) {
+            let _ = status.send(bytes);
+        }
+    });
 }
 
 fn handle(message: ClientMessage, state: &AppState) {
@@ -295,7 +418,7 @@ fn handle(message: ClientMessage, state: &AppState) {
         ClientMessage::Resize { width, height } => Command::Resize { width, height },
         ClientMessage::Camera { position } => Command::Camera { position },
         ClientMessage::Move { x, z } => Command::Move { x, z },
-        ClientMessage::Ping { .. } => return,
+        ClientMessage::Avatar { .. } | ClientMessage::Ping { .. } => return,
     };
     let _ = state.commands.send(command);
 }

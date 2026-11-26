@@ -390,6 +390,20 @@ impl ServerHost {
                 linear,
                 angular,
             } => self.apply_pose(index, player, part, cframe, [linear, angular]),
+            ToServer::Avatar {
+                name,
+                user_id,
+                avatar,
+            } => {
+                if let Err(e) = rt.apply_avatar(player, &name, user_id, avatar) {
+                    let mut w = rt.world_mut();
+                    w.push_log(
+                        rook_lua::MessageType::Error,
+                        format!("applying avatar {name}: {e}"),
+                    );
+                }
+            }
+            ToServer::StandardBody => rt.mark_standard_body(player),
             ToServer::Remote(RemoteMessage { remote, kind, args }) => match kind {
                 RemoteKind::FireServer => {
                     if let Some(r) = remote {

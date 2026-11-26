@@ -4,7 +4,7 @@ import { GuiOverlay } from "./gui";
 import { FlyCamera, World } from "./world";
 import { PlayerCamera } from "./player-camera";
 import { Net, type Status } from "./net";
-import type { ClientMessage, Vec3 } from "./protocol";
+import type { AnimationClip, ClientMessage, Vec3 } from "./protocol";
 
 const canvas = document.getElementById("viewport") as HTMLCanvasElement;
 const guiRoot = document.getElementById("gui") as HTMLDivElement;
@@ -17,6 +17,12 @@ const statusLabel = document.getElementById("status") as HTMLDivElement;
 const statusDot = document.getElementById("status-dot") as HTMLSpanElement;
 const statsButton = document.getElementById("stats-button") as HTMLButtonElement;
 const statsPanel = document.getElementById("stats-panel") as HTMLDivElement;
+const avatarButton = document.getElementById("avatar-button") as HTMLButtonElement;
+const avatarPanel = document.getElementById("avatar-panel") as HTMLDivElement;
+const avatarForm = document.getElementById("avatar-form") as HTMLFormElement;
+const avatarUsername = document.getElementById("avatar-username") as HTMLInputElement;
+const avatarSubmit = document.getElementById("avatar-submit") as HTMLButtonElement;
+const avatarStatus = document.getElementById("avatar-status") as HTMLDivElement;
 const fullscreenButton = document.getElementById("fullscreen-button") as HTMLButtonElement;
 const joystick = document.getElementById("joystick") as HTMLDivElement;
 const joystickThumb = document.getElementById("joystick-thumb") as HTMLDivElement;
@@ -38,6 +44,7 @@ let playerCamera: PlayerCamera | undefined;
 /** Play mode with Rook's own controller: the browser drives the character. */
 let playMode = false;
 let statsOpen = false;
+let avatarOpen = false;
 let welcomed = false;
 let lastCameraSent = 0;
 // A welcome is the scene at its tick; deltas queued from before it must
@@ -103,6 +110,22 @@ const net = new Net(
     }
   },
   (status, detail) => setStatus(status, detail),
+  (status) => {
+    avatarStatus.className = status.state === "ready" ? "ok" : status.state === "error" ? "bad" : "warn";
+    if (status.state === "loading") {
+      avatarSubmit.disabled = true;
+      avatarStatus.textContent = `Looking up ${status.username}…`;
+    } else if (status.state === "ready") {
+      avatarSubmit.disabled = false;
+      avatarStatus.textContent = status.name
+        ? `Wearing ${status.name}'s classic R6 avatar.`
+        : "Avatar ready.";
+      if (status.animations?.length) world.setAvatarAnimations(status.animations);
+    } else {
+      avatarSubmit.disabled = false;
+      avatarStatus.textContent = status.message ?? `Couldn't find ${status.username}.`;
+    }
+  },
   (t) => {
     pingMs = Math.max(0, Math.round(performance.now() - t));
   },
@@ -144,7 +167,24 @@ function setStatsOpen(open: boolean): void {
   statsOpen = open;
   statsPanel.hidden = !open;
   statsButton.setAttribute("aria-expanded", String(open));
-  if (open) updateStats();
+  if (open) {
+    setAvatarOpen(false);
+    updateStats();
+  }
+}
+
+function setAvatarOpen(open: boolean): void {
+  avatarOpen = open;
+  avatarPanel.hidden = !open;
+  avatarButton.setAttribute("aria-expanded", String(open));
+  if (open) {
+    setStatsOpen(false);
+    stopMoving();
+    // Opening the panel stops the character; the field takes the keyboard.
+    window.setTimeout(() => avatarUsername.focus(), 0);
+  } else {
+    avatarUsername.blur();
+  }
 }
 
 function updateStats(): void {
@@ -272,12 +312,14 @@ function desiredMove(): { x: number; z: number } {
 }
 
 function updateMovement(now: number): void {
-  const canMove = playMode && world.player?.root != null;
+  const canMove = playMode && !avatarOpen && world.player?.root != null;
   const move = canMove ? desiredMove() : { x: 0, z: 0 };
   const moving = move.x !== 0 || move.z !== 0;
   const changed = Math.abs(move.x - lastMove.x) > 1e-4 || Math.abs(move.z - lastMove.z) > 1e-4;
   if (moving) {
-    if (changed || now - lastMoveSent >= 33) {
+    // Every drawn frame, capped at 60 Hz: the server is local, so the
+    // shortest practical path is one send per tick.
+    if (changed || now - lastMoveSent >= 16) {
       send({ kind: "move", x: move.x, z: move.z });
       lastMove = move;
       lastMoveSent = now;
@@ -309,6 +351,14 @@ function hideCharacter(hide: boolean): void {
 }
 
 window.addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+    if (event.code === "Escape") setAvatarOpen(false);
+    return;
+  }
+  if (avatarOpen) {
+    if (event.code === "Escape") setAvatarOpen(false);
+    return;
+  }
   if (event.repeat) return;
   const code = robloxCode(event);
   if (!code) return;
@@ -318,6 +368,7 @@ window.addEventListener("keydown", (event) => {
     document.exitPointerLock();
   }
   if (statsOpen && code === "Escape") setStatsOpen(false);
+  if (avatarOpen && code === "Escape") setAvatarOpen(false);
   fly?.key(code, true);
   send({ kind: "key", code, down: true });
   // Typing reaches a focused TextBox; with none focused the engine
@@ -597,11 +648,28 @@ for (const type of ["pointerup", "pointercancel", "lostpointercapture"] as const
 }
 
 statsButton.addEventListener("click", () => setStatsOpen(!statsOpen));
+avatarButton.addEventListener("click", () => setAvatarOpen(!avatarOpen));
+
+avatarForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const username = avatarUsername.value.trim();
+  if (!username) return;
+  avatarSubmit.disabled = true;
+  avatarStatus.className = "warn";
+  avatarStatus.textContent = `Looking up ${username}…`;
+  send({ kind: "avatar", username });
+  avatarUsername.blur();
+});
 
 document.addEventListener("pointerdown", (event) => {
-  if (!statsOpen) return;
+  if (!statsOpen && !avatarOpen) return;
   const target = event.target as Node;
-  if (!statsPanel.contains(target) && !statsButton.contains(target)) setStatsOpen(false);
+  if (statsOpen && !statsPanel.contains(target) && !statsButton.contains(target)) {
+    setStatsOpen(false);
+  }
+  if (avatarOpen && !avatarPanel.contains(target) && !avatarButton.contains(target)) {
+    setAvatarOpen(false);
+  }
 });
 
 if (document.fullscreenEnabled) {
@@ -648,7 +716,7 @@ function frame(now: number): void {
   }
 
   updateMovement(now);
-  world.render(now);
+  world.render(now, dt);
 
   frames++;
   if (now - shown > 500) {
@@ -662,6 +730,16 @@ function frame(now: number): void {
 
 world.resize(window.innerWidth, window.innerHeight);
 net.connect();
+// The official R6 clips are static and large: fetch them once here so
+// the default body animates before the player picks a username.
+void fetch("/api/animations")
+  .then((response) => (response.ok ? response.json() : []))
+  .then((clips: unknown) => {
+    if (Array.isArray(clips) && clips.length > 0) {
+      world.setAvatarAnimations(clips as AnimationClip[]);
+    }
+  })
+  .catch(() => {});
 requestAnimationFrame(frame);
 
 window.setInterval(() => {

@@ -2,7 +2,7 @@
 //! with reconnection while the server is reachable.
 
 import { decode, encode } from "@msgpack/msgpack";
-import type { ClientMessage, ServerMessage, Snapshot, Welcome } from "./protocol";
+import type { AvatarStatus, ClientMessage, ServerMessage, Snapshot, Welcome } from "./protocol";
 
 export type Status = "connecting" | "connected" | "reconnecting" | "failed";
 
@@ -18,6 +18,7 @@ export class Net {
     private readonly onWelcome: (welcome: Welcome) => void,
     private readonly onSnapshot: (snapshot: Snapshot) => void,
     private readonly onStatus: (status: Status, detail: string) => void,
+    private readonly onAvatar: (status: AvatarStatus) => void,
     private readonly onPong?: (t: number) => void,
   ) {}
 
@@ -72,6 +73,9 @@ export class Net {
         break;
       case "snapshot":
         this.onSnapshot(message.snapshot);
+        break;
+      case "avatar":
+        this.onAvatar(message.avatar);
         break;
       case "pong":
         this.onPong?.(message.t);

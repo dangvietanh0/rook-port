@@ -139,6 +139,14 @@ const PAINTED: [&[&str]; 6] = [
     &["Right Leg", "RightUpperLeg", "RightLowerLeg", "RightFoot"],
 ];
 
+impl Avatar {
+    /// Read `avatar.roblox.com/v1/users/{id}/avatar`'s answer, as the web
+    /// port does after resolving a username.
+    pub fn from_api_json(json: &Json) -> Self {
+        from_json(json)
+    }
+}
+
 /// Read `avatar.roblox.com/v1/users/{id}/avatar`'s answer.
 fn from_json(json: &Json) -> Avatar {
     let colors = &json["bodyColors"];

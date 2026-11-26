@@ -21,7 +21,10 @@ rook-client.workspace = true
 rook-render.workspace = true
 rook-gui.workspace = true
 rook-dom.workspace = true
+rook-lua.workspace = true
+rook-formats.workspace = true
 rook-platform = { workspace = true, features = ["native"] }
+blake3.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 glam.workspace = true

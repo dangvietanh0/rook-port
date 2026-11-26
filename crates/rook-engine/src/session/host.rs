@@ -18,7 +18,7 @@ pub use server::{STARTER_PLAYER_COPIES, ServerHost};
 use rustc_hash::FxHashMap;
 
 use rook_dom::InstanceId;
-use rook_lua::{EffectCall, NetValue, RemoteKind, RemoteMessage, ToolActivation, ToolMove};
+use rook_lua::{Avatar, EffectCall, NetValue, RemoteKind, RemoteMessage, ToolActivation, ToolMove};
 use rook_net::{Sink, Snapshot, Source, Update};
 use rook_types::Value;
 
@@ -77,6 +77,16 @@ pub enum ToServer {
         linear: glam::Vec3,
         angular: glam::Vec3,
     },
+    /// The player chose a Roblox username: take its name and user ID, keep
+    /// this look for its spawns, force R6, and respawn it.
+    Avatar {
+        name: String,
+        user_id: i64,
+        avatar: Avatar,
+    },
+    /// The web port's player always wears a standard R6 body, even before
+    /// choosing a username. Mark it before the first spawn.
+    StandardBody,
 }
 
 /// What a client needs to start: the replicated game and who it is.

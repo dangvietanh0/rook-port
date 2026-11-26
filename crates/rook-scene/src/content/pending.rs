@@ -47,6 +47,7 @@ impl SceneCache {
             self.arrivals = arrivals;
         }
         if self.files.idle() && self.arrivals.is_empty() {
+            self.report.retain(|part| self.index.contains_key(&part));
             self.report.flush(dom);
         }
         changed

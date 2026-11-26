@@ -313,6 +313,9 @@ pub struct World {
     pub rigs: Option<crate::api::methods::characters::RigSource>,
     /// Players' looks from the avatar API; the rest have the default look.
     pub(crate) avatars: FxHashMap<InstanceId, crate::api::methods::characters::Avatar>,
+    /// Players the web port gave a standard Roblox avatar. They always get
+    /// the R6 rig built here, never the place's StarterCharacter.
+    pub(crate) standard_avatars: FxHashSet<InstanceId>,
     /// Players whose look is still on its way, whose first spawn waits.
     pub avatars_pending: FxHashSet<InstanceId>,
     /// Players whose clients simulate their characters (a server's).
@@ -392,6 +395,7 @@ impl World {
             spawned: FxHashSet::default(),
             rigs: None,
             avatars: FxHashMap::default(),
+            standard_avatars: FxHashSet::default(),
             avatars_pending: FxHashSet::default(),
             client_players: FxHashSet::default(),
             owned_here: crate::OwnedHere::default(),
@@ -462,6 +466,7 @@ impl World {
         self.audio.spectra.remove(&id);
         self.spawned.remove(&id);
         self.avatars.remove(&id);
+        self.standard_avatars.remove(&id);
         self.avatars_pending.remove(&id);
         self.client_players.remove(&id);
         self.physics.forget_network_owner(id);

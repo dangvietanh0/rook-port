@@ -278,6 +278,12 @@ impl SceneCache {
         std::mem::take(&mut self.lighting_changed)
     }
 
+    /// Whether any local light changed since the last call
+    /// ([`Scene::lights`]). A host streaming lights sends them only then.
+    pub fn take_lights_change(&mut self) -> bool {
+        !self.lights.take_changes().is_empty()
+    }
+
     /// Every entry the scene draws, with the instance it belongs to and
     /// its layer (0 is the part; its Decals and Textures follow in draw
     /// order). Hosts that stream the scene rather than draw it read this:

@@ -2,9 +2,10 @@
 //! Humanoid controller's reports.
 
 use rook_dom::InstanceId;
+use rook_types::Value;
 
 use crate::runtime::ctx::ScriptError;
-use crate::{MessageType, Runtime};
+use crate::{Avatar, MessageType, Runtime};
 
 impl Runtime {
     /// Spawn a player's character (`Player:LoadCharacter()`), firing the
@@ -15,6 +16,39 @@ impl Runtime {
             crate::runtime::threads::drain_deferred(&self.lua);
             r
         })
+    }
+
+    /// Give `player` a standard Roblox avatar: rename it, set its user ID,
+    /// keep the look for its spawns, force R6, and respawn it. Used by the
+    /// web port when the player chooses a username in-game.
+    pub fn apply_avatar(
+        &self,
+        player: InstanceId,
+        name: &str,
+        user_id: i64,
+        avatar: Avatar,
+    ) -> Result<InstanceId, ScriptError> {
+        let start = self.world().dom.journal().end();
+        {
+            let mut w = self.world_mut();
+            let dom = &mut w.dom;
+            dom.set_name(player, name.to_owned())?;
+            dom.set_property_by_name(player, "UserId", Value::Int64(user_id))?;
+            dom.set_property_by_name(player, "DisplayName", Value::String(name.to_owned()))?;
+            if let Some(starter) = dom.find_service("StarterPlayer") {
+                dom.set_property_by_name(starter, "GameSettingsAvatar", Value::Enum(0))?;
+            }
+            w.avatars.insert(player, avatar);
+            w.standard_avatars.insert(player);
+        }
+        self.dispatch_since(start);
+        self.load_character(player)
+    }
+
+    /// The web port's player wears a standard R6 body before it picks a
+    /// username. Marking it is enough: the first spawn reads this.
+    pub fn mark_standard_body(&self, player: InstanceId) {
+        self.world_mut().standard_avatars.insert(player);
     }
 
     /// A player joined: it goes on an auto-assignable team, and its look
